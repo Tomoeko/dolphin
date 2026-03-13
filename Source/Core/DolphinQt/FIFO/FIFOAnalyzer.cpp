@@ -855,7 +855,7 @@ public:
     // SU coord scale
     for (int i = 0; i < 8; i++) { m_su_ssize[i] = 0; m_su_tsize[i] = 0; m_su_set[i] = false; }
     m_prim_count = 0;
-    m_vertices.clear();
+    m_primitives.clear();
     m_chan0_color_src = -1;
     m_chan0_alpha_src = -1;
     // Viewport & Projection (persistent state, do NOT reset per-object)
@@ -1125,13 +1125,12 @@ public:
                                           const u32 vertex_size, const u16 num_vertices,
                                           const u8* vertex_data))
   {
-    m_prim_type = primitive;
     m_prim_count++;
-    m_prim_num_verts = num_vertices;
-    m_prim_vert_size = vertex_size;
+
+    PrimitiveGroup pg;
+    pg.type = primitive;
 
     // Parse vertex data to extract positions and colors
-    m_vertices.clear();
     const auto& vtx_desc = m_cpmem.vtx_desc;
     const auto& vtx_attr = m_cpmem.vtx_attr[vat];
 
@@ -1256,8 +1255,9 @@ public:
         }
       }
 
-      m_vertices.push_back(vi);
+      pg.vertices.push_back(vi);
     }
+    m_primitives.push_back(pg);
   }
 
   OPCODE_CALLBACK(void OnCP(const u8 command, const u32 value)) {}
@@ -1660,13 +1660,16 @@ public:
       }
 
       // Final note about vertex colors
-      if (!m_vertices.empty() && m_vertices[0].has_color)
+      if (!m_primitives.empty() && !m_primitives[0].vertices.empty() && m_primitives[0].vertices[0].has_color)
       {
         bool all_same_alpha = true;
-        u8 first_alpha = m_vertices[0].ca;
-        for (const auto& v : m_vertices)
+        u8 first_alpha = m_primitives[0].vertices[0].ca;
+        for (const auto& pg : m_primitives)
         {
-          if (v.has_color && v.ca != first_alpha) { all_same_alpha = false; break; }
+          for (const auto& v : pg.vertices)
+          {
+            if (v.has_color && v.ca != first_alpha) { all_same_alpha = false; break; }
+          }
         }
         if (all_same_alpha && first_alpha == 0)
           ss << "  ║   ⚠ All vertex alpha = 0 → object is fully TRANSPARENT\n";
@@ -1719,31 +1722,28 @@ public:
     // Vertex data
     if (m_prim_count > 0)
     {
-      ss << fmt::format("  ║ Primitives: {} draw(s), {} verts, {} bytes/vert\n",
-                        m_prim_count, m_prim_num_verts, m_prim_vert_size);
+      ss << fmt::format("  ║ Primitives: {} draw(s)\n", m_prim_count);
 
-      for (size_t vi = 0; vi < m_vertices.size() && vi < 8; vi++)
+      size_t vi = 0;
+      float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+      for (const auto& pg : m_primitives)
       {
-        const auto& v = m_vertices[vi];
-        ss << "  ║   V" << vi << ": ";
-        if (v.has_pos) ss << fmt::format("pos=({:.2f},{:.2f},{:.2f}) ", v.px, v.py, v.pz);
-        if (v.has_color) ss << fmt::format("rgba=({},{},{},{}) ", v.cr, v.cg, v.cb, v.ca);
-        for (int t = 0; t < 8; t++)
+        for (const auto& v : pg.vertices)
         {
-          if (v.has_uv_set[t])
-            ss << fmt::format("uv{}=({:.4f},{:.4f}) ", t, v.uvs[t][0], v.uvs[t][1]);
-        }
-        ss << "\n";
-      }
-      if (m_vertices.size() > 8)
-        ss << fmt::format("  ║   ... and {} more vertices\n", m_vertices.size() - 8);
+          if (vi < 8)
+          {
+            ss << "  ║   V" << vi << ": ";
+            if (v.has_pos) ss << fmt::format("pos=({:.2f},{:.2f},{:.2f}) ", v.px, v.py, v.pz);
+            if (v.has_color) ss << fmt::format("rgba=({},{},{},{}) ", v.cr, v.cg, v.cb, v.ca);
+            for (int t = 0; t < 8; t++)
+            {
+              if (v.has_uv_set[t])
+                ss << fmt::format("uv{}=({:.4f},{:.4f}) ", t, v.uvs[t][0], v.uvs[t][1]);
+            }
+            ss << "\n";
+          }
+          vi++;
 
-      // Compute bounding box from vertex positions
-      if (m_vertices.size() >= 2)
-      {
-        float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
-        for (const auto& v : m_vertices)
-        {
           if (v.has_pos)
           {
             if (v.px < minx) minx = v.px;
@@ -1752,11 +1752,14 @@ public:
             if (v.py > maxy) maxy = v.py;
           }
         }
-        if (minx < 1e8f)
-        {
-          ss << fmt::format("  ║ BBox: ({:.1f},{:.1f}) - ({:.1f},{:.1f})  size={:.1f}x{:.1f}\n",
-                            minx, miny, maxx, maxy, maxx-minx, maxy-miny);
-        }
+      }
+      if (vi > 8)
+        ss << fmt::format("  ║   ... and {} more vertices\n", vi - 8);
+
+      if (minx < 1e8f)
+      {
+        ss << fmt::format("  ║ BBox: ({:.1f},{:.1f}) - ({:.1f},{:.1f})  size={:.1f}x{:.1f}\n",
+                          minx, miny, maxx, maxy, maxx-minx, maxy-miny);
       }
     }
 
@@ -1772,6 +1775,12 @@ public:
     float uvs[8][2] = {};  // up to 8 UV sets
     bool has_pos = false, has_color = false;
     bool has_uv_set[8] = {};
+  };
+
+  struct PrimitiveGroup
+  {
+    OpcodeDecoder::Primitive type;
+    std::vector<VertexInfo> vertices;
   };
 
   CPState m_cpmem;
@@ -1814,10 +1823,7 @@ public:
   u32 m_su_ssize[8] = {}, m_su_tsize[8] = {};
   bool m_su_set[8] = {};
   u32 m_prim_count = 0;
-  OpcodeDecoder::Primitive m_prim_type = OpcodeDecoder::Primitive::GX_DRAW_QUADS;
-  u16 m_prim_num_verts = 0;
-  u32 m_prim_vert_size = 0;
-  std::vector<VertexInfo> m_vertices;
+  std::vector<PrimitiveGroup> m_primitives;
   int m_chan0_color_src = -1, m_chan0_alpha_src = -1;
   // GX Viewport (from XF 0x101A)
   bool m_vp_set = false;
@@ -2253,8 +2259,12 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       // Collect screen-space quad vertices (up to 4) with their UVs.
       // These are the actual corners of the rendered quad after the full
       // GX pipeline.
-      struct ScreenVert { float sx, sy, u, v; };
-      std::vector<ScreenVert> quad_verts;
+      struct ScreenVert {
+        float sx, sy;
+        float uvs[8][2];
+        float r, g, b, a;
+      };
+      std::vector<ScreenVert> triangles;
 
       // Helper: apply full GX pipeline to a vertex position
       // Step 1: Full 3x4 model-view matrix multiply (handles rotation/skew/mirror)
@@ -2282,15 +2292,74 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       };
 
       // Transform vertices to screen-space and collect quad corners
-      for (const auto& v : summary_cb.m_vertices)
+      for (const auto& pg : summary_cb.m_primitives)
       {
-        if (!v.has_pos) continue;
-        auto [sx, sy] = transform_vert(v.px, v.py, v.pz, v.pos_idx);
-
-        // Collect quad vertices (first 4 with UVs)
-        if (v.has_uv_set[0] && quad_verts.size() < 4)
+        std::vector<ScreenVert> pg_verts;
+        for (const auto& v : pg.vertices)
         {
-          quad_verts.push_back({sx, sy, v.uvs[0][0], v.uvs[0][1]});
+          if (!v.has_pos) continue;
+          auto [sx, sy] = transform_vert(v.px, v.py, v.pz, v.pos_idx);
+          float r = v.has_color ? (v.cr / 255.0f) : 1.0f;
+          float g = v.has_color ? (v.cg / 255.0f) : 1.0f;
+          float b = v.has_color ? (v.cb / 255.0f) : 1.0f;
+          float a = v.has_color ? (v.ca / 255.0f) : 1.0f;
+          ScreenVert sv;
+          sv.sx = sx; sv.sy = sy;
+          for (int t = 0; t < 8; t++) {
+            sv.uvs[t][0] = v.has_uv_set[t] ? v.uvs[t][0] : 0.0f;
+            sv.uvs[t][1] = v.has_uv_set[t] ? v.uvs[t][1] : 0.0f;
+          }
+          sv.r = r; sv.g = g; sv.b = b; sv.a = a;
+          pg_verts.push_back(sv);
+        }
+
+        // Triangulate based on primitive type
+        if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_QUADS)
+        {
+          for (size_t i = 0; i + 3 < pg_verts.size(); i += 4)
+          {
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
+            triangles.push_back(pg_verts[i + 2]);
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 2]);
+            triangles.push_back(pg_verts[i + 3]);
+          }
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLES)
+        {
+          for (size_t i = 0; i + 2 < pg_verts.size(); i += 3)
+          {
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
+            triangles.push_back(pg_verts[i + 2]);
+          }
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_STRIP)
+        {
+          for (size_t i = 0; i + 2 < pg_verts.size(); i++)
+          {
+            triangles.push_back(pg_verts[i]);
+            if (i % 2 == 0)
+            {
+              triangles.push_back(pg_verts[i + 1]);
+              triangles.push_back(pg_verts[i + 2]);
+            }
+            else
+            {
+              triangles.push_back(pg_verts[i + 2]);
+              triangles.push_back(pg_verts[i + 1]);
+            }
+          }
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_FAN)
+        {
+          for (size_t i = 1; i + 1 < pg_verts.size(); i++)
+          {
+            triangles.push_back(pg_verts[0]);
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
+          }
         }
       }
 
@@ -2311,18 +2380,21 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
 
       // (screenX/Y/W/H and uvTL/BR removed — raw data is in quad[] and vertices[])
 
-      // Screen-space quad vertices — 4 corners with final pixel positions + UVs.
-      // The C# compositor can use AddImageQuad with these for accurate rendering
-      // of rotated/mirrored/skewed quads.
-      if (quad_verts.size() == 4)
+      // Screen-space triangles — final pixel positions + UVs + vertex colors.
+      if (triangles.size() > 0)
       {
-        json << "          \"quad\": [\n";
-        for (size_t qi = 0; qi < quad_verts.size(); qi++)
+        json << "          \"triangles\": [\n";
+        for (size_t qi = 0; qi < triangles.size(); qi++)
         {
-          const auto& qv = quad_verts[qi];
-          json << fmt::format("            {{\"sx\": {:.2f}, \"sy\": {:.2f}, \"u\": {:.6f}, \"v\": {:.6f}}}",
-                              qv.sx, qv.sy, qv.u, qv.v);
-          if (qi + 1 < quad_verts.size()) json << ",";
+          const auto& qv = triangles[qi];
+          json << fmt::format("            {{\"sx\": {:.2f}, \"sy\": {:.2f}, \"uvs\": [", qv.sx, qv.sy);
+          for (int t = 0; t < 8; t++) {
+            if (t > 0) json << ", ";
+            json << fmt::format("[{:.6f}, {:.6f}]", qv.uvs[t][0], qv.uvs[t][1]);
+          }
+          json << fmt::format("], \"r\": {:.6f}, \"g\": {:.6f}, \"b\": {:.6f}, \"a\": {:.6f}}}",
+                              qv.r, qv.g, qv.b, qv.a);
+          if (qi + 1 < triangles.size()) json << ",";
           json << "\n";
         }
         json << "          ],\n";
@@ -2533,25 +2605,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
         json << fmt::format("          \"blendEnable\": {},\n", bm.blend_enable ? "true" : "false");
       }
 
-      // Vertex data (positions + colors for each vertex)
-      json << "          \"vertices\": [";
-      bool first_vert = true;
-      for (const auto& v : summary_cb.m_vertices)
-      {
-        if (!v.has_pos) continue;
-        if (!first_vert) json << ", ";
-        first_vert = false;
-
-        json << fmt::format("{{\"x\": {:.2f}, \"y\": {:.2f}", v.px, v.py);
-        if (v.has_color)
-          json << fmt::format(", \"r\": {}, \"g\": {}, \"b\": {}, \"a\": {}",
-                               v.cr, v.cg, v.cb, v.ca);
-        // Include UV0 if present
-        if (v.has_uv_set[0])
-          json << fmt::format(", \"u0\": {:.4f}, \"v0\": {:.4f}", v.uvs[0][0], v.uvs[0][1]);
-        json << "}";
-      }
-      json << "],\n";
+      // Vertex data (positions + colors for each vertex) handled in triangles array.
 
       // Draw order
       json << "          \"drawOrder\": " << object_idx << "\n";
@@ -2784,57 +2838,28 @@ function blendFactor(factor, src, dst) {
   }
 }
 
-// Check if point is inside quad (4 screen-space vertices)
-function pointInQuad(px, py, quad) {
-  // Use cross product winding test for convex quad
-  let inside = true;
-  for (let i = 0; i < 4; i++) {
-    const j = (i + 1) % 4;
-    const ex = quad[j].sx - quad[i].sx;
-    const ey = quad[j].sy - quad[i].sy;
-    const dx = px - quad[i].sx;
-    const dy = py - quad[i].sy;
-    if (ex * dy - ey * dx < -0.001) { inside = false; break; }
+// Compute barycentric coordinates for point (px,py) in triangle (v0, v1, v2)
+// Returns [w0, w1, w2] or null if outside.
+function barycentric(px, py, v0, v1, v2) {
+  const d00 = v1.sx - v0.sx;
+  const d01 = v2.sx - v0.sx;
+  const d10 = v1.sy - v0.sy;
+  const d11 = v2.sy - v0.sy;
+  const det = d00 * d11 - d01 * d10;
+  if (Math.abs(det) < 0.000001) return null; // Degenerate 
+
+  const dx = px - v0.sx;
+  const dy = py - v0.sy;
+  const beta = (dx * d11 - dy * d01) / det;
+  const gamma = (d00 * dy - d10 * dx) / det;
+  const alpha = 1.0 - beta - gamma;
+
+  // A small epsilon allows picking up edge pixels
+  const eps = -0.001; 
+  if (alpha >= eps && beta >= eps && gamma >= eps) {
+    return [Math.max(0, alpha), Math.max(0, beta), Math.max(0, gamma)];
   }
-  if (inside) return true;
-  // Try reverse winding
-  inside = true;
-  for (let i = 0; i < 4; i++) {
-    const j = (i + 1) % 4;
-    const ex = quad[j].sx - quad[i].sx;
-    const ey = quad[j].sy - quad[i].sy;
-    const dx = px - quad[i].sx;
-    const dy = py - quad[i].sy;
-    if (ex * dy - ey * dx > 0.001) { inside = false; break; }
-  }
-  return inside;
-}
-
-// Bilinear interpolation to get UV at screen point within quad
-function interpolateUV(px, py, quad) {
-  // Use inverse bilinear for quad: find (s,t) such that
-  // P = (1-s)(1-t)*V0 + s(1-t)*V1 + s*t*V2 + (1-s)*t*V3
-  // Simplified: project onto axes defined by quad edges
-  const v0 = quad[0], v1 = quad[1], v2 = quad[2], v3 = quad[3];
-
-  // For axis-aligned quads (common case), use simple linear interpolation
-  const minX = Math.min(v0.sx, v1.sx, v2.sx, v3.sx);
-  const maxX = Math.max(v0.sx, v1.sx, v2.sx, v3.sx);
-  const minY = Math.min(v0.sy, v1.sy, v2.sy, v3.sy);
-  const maxY = Math.max(v0.sy, v1.sy, v2.sy, v3.sy);
-
-  const s = maxX > minX ? (px - minX) / (maxX - minX) : 0;
-  const t = maxY > minY ? (py - minY) / (maxY - minY) : 0;
-
-  // Find which vertices are TL, TR, BR, BL by position
-  const sorted = [...quad].sort((a, b) => a.sy - b.sy || a.sx - b.sx);
-  const top = sorted.slice(0, 2).sort((a, b) => a.sx - b.sx);
-  const bot = sorted.slice(2, 4).sort((a, b) => a.sx - b.sx);
-  const tl = top[0], tr = top[1], bl = bot[0], br = bot[1];
-
-  const u = (1-t) * ((1-s)*tl.u + s*tr.u) + t * ((1-s)*bl.u + s*br.u);
-  const v = (1-t) * ((1-s)*tl.v + s*tr.v) + t * ((1-s)*bl.v + s*br.v);
-  return [u, v];
+  return null;
 }
 
 async function render() {
@@ -2860,17 +2885,18 @@ async function render() {
   }
 
   // Process each object in draw order
-  for (const obj of allObjects) {
-    const quad = obj.quad;
-    if (!quad || quad.length !== 4) continue;
-
-    // Compute screen AABB (subtract EFB bias to get 0-based coords)
-    let qMinX = Infinity, qMinY = Infinity, qMaxX = -Infinity, qMaxY = -Infinity;
-    for (const v of quad) {
-      const sx = v.sx - EFB_BIAS, sy = v.sy - EFB_BIAS;
-      qMinX = Math.min(qMinX, sx); qMinY = Math.min(qMinY, sy);
-      qMaxX = Math.max(qMaxX, sx); qMaxY = Math.max(qMaxY, sy);
+  for (let objIdx = 0; objIdx < allObjects.length; objIdx++) {
+    const obj = allObjects[objIdx];
+    
+    if (objIdx % 10 === 0) {
+      document.getElementById('status').textContent = 
+        'Rendering ' + objIdx + ' / ' + allObjects.length + ' objects...';
+      ctx.putImageData(fb, 0, 0); // Show progressive render
+      await new Promise(r => setTimeout(r, 1)); // Yield to unblock browser
     }
+
+    const triangles = obj.triangles;
+    if (!triangles || triangles.length === 0) continue;
 
     // Scissor clip (scissor values also include EFB bias)
     let scX0 = 0, scY0 = 0, scX1 = W, scY1 = H;
@@ -2880,13 +2906,6 @@ async function render() {
       scX1 = obj.scissor.x1 - EFB_BIAS;
       scY1 = obj.scissor.y1 - EFB_BIAS;
     }
-
-    // Effective draw region
-    const rx0 = Math.max(0, Math.floor(Math.max(qMinX, scX0)));
-    const ry0 = Math.max(0, Math.floor(Math.max(qMinY, scY0)));
-    const rx1 = Math.min(W, Math.ceil(Math.min(qMaxX, scX1)));
-    const ry1 = Math.min(H, Math.ceil(Math.min(qMaxY, scY1)));
-    if (rx0 >= rx1 || ry0 >= ry1) continue;
 
     // Get texture info
     const texInfo = (obj.textures && obj.textures.length > 0) ? obj.textures[0] : null;
@@ -2901,48 +2920,85 @@ async function render() {
     const tevAlphaOps = obj.tevAlphaOps || [];
     const tevKonstSel = obj.tevKonstSel || [];
 
-    // Vertex color (raster color) - use first vertex
-    const v0 = (obj.vertices && obj.vertices.length > 0) ? obj.vertices[0] : null;
-    const rasColor = v0 && v0.r !== undefined ?
-      [v0.r/255, v0.g/255, v0.b/255, v0.a/255] : [1, 1, 1, 1];
-
     // Blend mode
     const blendEnable = obj.blendEnable !== undefined ? obj.blendEnable : true;
     const blendSrc = obj.blendSrc !== undefined ? obj.blendSrc : 4; // SrcAlpha
     const blendDst = obj.blendDst !== undefined ? obj.blendDst : 5; // InvSrcAlpha
 
-    // Adjust quad to 0-based screen coords
-    const adjQuad = quad.map(v => ({sx: v.sx - EFB_BIAS, sy: v.sy - EFB_BIAS, u: v.u, v: v.v}));
+    // Adjust triangles to 0-based screen coords
+    const adjTriangles = triangles.map(v => ({
+      sx: v.sx - EFB_BIAS, sy: v.sy - EFB_BIAS, 
+      uvs: v.uvs, 
+      r: v.r, g: v.g, b: v.b, a: v.a
+    }));
 
-    // Rasterize pixels in the bounding box
-    for (let py = ry0; py < ry1; py++) {
-      for (let px = rx0; px < rx1; px++) {
-        // Point-in-quad test
-        if (!pointInQuad(px + 0.5, py + 0.5, adjQuad)) continue;
+    // Iterate over each triangle
+    for (let i = 0; i < adjTriangles.length; i += 3) {
+      const v0 = adjTriangles[i], v1 = adjTriangles[i+1], v2 = adjTriangles[i+2];
 
-        // Interpolate UV
-        const [u, v] = interpolateUV(px + 0.5, py + 0.5, adjQuad);
+      // Compute triangle AABB
+      const tMinX = Math.min(v0.sx, v1.sx, v2.sx);
+      const tMinY = Math.min(v0.sy, v1.sy, v2.sy);
+      const tMaxX = Math.max(v0.sx, v1.sx, v2.sx);
+      const tMaxY = Math.max(v0.sy, v1.sy, v2.sy);
 
-        // Sample texture
-        const texSample = texInfo ?
-          sampleTex(texImg, u, v, wrapS, wrapT).map(c => c/255) :
-          [1, 1, 1, 1];
+      // Effective draw region
+      const rx0 = Math.max(0, Math.floor(Math.max(tMinX, scX0)));
+      const ry0 = Math.max(0, Math.floor(Math.max(tMinY, scY0)));
+      const rx1 = Math.min(W, Math.ceil(Math.min(tMaxX, scX1)));
+      const ry1 = Math.min(H, Math.ceil(Math.min(tMaxY, scY1)));
+      if (rx0 >= rx1 || ry0 >= ry1) continue;
 
-        // Initialize TEV registers
-        const tevRegs = {
-          prev: [0, 0, 0, 0],
-          c0: (colorRegs.c0 || [0,0,0,0]).map(c => c/255),
-          c1: (colorRegs.c1 || [0,0,0,0]).map(c => c/255),
-          c2: (colorRegs.c2 || [0,0,0,0]).map(c => c/255),
-        };
+      // Rasterize pixels in the bounding box
+      for (let py = ry0; py < ry1; py++) {
+        for (let px = rx0; px < rx1; px++) {
+          const weights = barycentric(px + 0.5, py + 0.5, v0, v1, v2);
+          if (!weights) continue;
+          
+          const [w0, w1, w2] = weights;
+          const uvs = [];
+          for (let t = 0; t < 8; t++) {
+            const u = w0 * v0.uvs[t][0] + w1 * v1.uvs[t][0] + w2 * v2.uvs[t][0];
+            const vParam = w0 * v0.uvs[t][1] + w1 * v1.uvs[t][1] + w2 * v2.uvs[t][1];
+            uvs.push([u, vParam]);
+          }
+          
+          const rasColor = [
+            w0 * v0.r + w1 * v1.r + w2 * v2.r,
+            w0 * v0.g + w1 * v1.g + w2 * v2.g,
+            w0 * v0.b + w1 * v1.b + w2 * v2.b,
+            w0 * v0.a + w1 * v1.a + w2 * v2.a
+          ];
+
+          // Initialize TEV registers
+          const tevRegs = {
+            prev: [0, 0, 0, 0],
+            c0: (colorRegs.c0 || [0,0,0,0]).map(c => c/255),
+            c1: (colorRegs.c1 || [0,0,0,0]).map(c => c/255),
+            c2: (colorRegs.c2 || [0,0,0,0]).map(c => c/255),
+          };
 
         // Run TEV stages
+        const tevTref = obj.tevTref || [];
         const numStages = Math.min(tevColorOps.length, tevAlphaOps.length);
         for (let s = 0; s < numStages; s++) {
           const cOp = tevColorOps[s];
           const aOp = tevAlphaOps[s];
           const ksel = tevKonstSel[s] || [0, 0];
           const konst = getKonstColor(ksel[0], ksel[1], konstRegs);
+
+          let texSample = [1, 1, 1, 1];
+          const tref = tevTref[s];
+          if (tref && tref.texEnable) {
+            const texMapIdx = tref.texMap;
+            const texCoordIdx = tref.texCoord < 8 ? tref.texCoord : 0;
+            const tInfo = (obj.textures || []).find(t => t.unit === texMapIdx);
+            if (tInfo) {
+              const tImg = texMap[tInfo.file];
+              const uvCoord = uvs[texCoordIdx];
+              texSample = sampleTex(tImg, uvCoord[0], uvCoord[1], tInfo.wrapS, tInfo.wrapT).map(c => c/255);
+            }
+          }
 
           // Color combiner
           const ca = getColorInput(cOp[0], tevRegs, texSample, rasColor, konst);
@@ -2999,6 +3055,7 @@ async function render() {
         fb.data[fbIdx+3] = 255; // Always opaque on screen
       }
     }
+  }
   }
 
   ctx.putImageData(fb, 0, 0);
