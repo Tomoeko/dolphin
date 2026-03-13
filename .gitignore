@@ -45,3 +45,4 @@ CMakeLists.txt.user
 .flatpak-builder
 /.cache
 Externals/fmt/fmt
+/Files

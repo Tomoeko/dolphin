@@ -808,9 +808,14 @@ public:
     m_has_pos_matrix = false;
     m_pos_tx = 0.0f; m_pos_ty = 0.0f; m_pos_tz = 0.0f;
     m_pos_sx = 1.0f; m_pos_sy = 1.0f;
-    // Initialize position matrix to identity
-    for (int i = 0; i < 12; i++) m_pos_mtx[i] = 0.0f;
-    m_pos_mtx[0] = 1.0f; m_pos_mtx[5] = 1.0f; m_pos_mtx[10] = 1.0f;
+    // Initialize position matrix table to identity (up to 256 floats)
+    for (int i = 0; i < 268; i++) m_pos_matrices[i] = 0.0f;
+    for (int i = 0; i < 64; i += 3)
+    {
+      m_pos_matrices[i*4 + 0] = 1.0f; // m00
+      if (i+1 < 64) m_pos_matrices[(i+1)*4 + 1] = 1.0f; // m11
+      if (i+2 < 64) m_pos_matrices[(i+2)*4 + 2] = 1.0f; // m22
+    }
     m_genmode_set = false;
     m_num_tev_stages = 0;
     for (int i = 0; i < 8; i++)
@@ -870,22 +875,19 @@ public:
 
   OPCODE_CALLBACK(void OnXF(const u16 address, const u8 count, const u8* data))
   {
-    // Track position matrix writes (XF memory 0x0000-0x000B = 12 floats = 3x4 matrix)
-    if (address == 0x0000 && count >= 12)
+    // Track position matrix writes (XF memory 0x0000-0x00FF = 256 floats)
+    if (address < 0x0100)
     {
       m_has_pos_matrix = true;
-      auto rf = [&](int idx) -> float {
-        return std::bit_cast<float>(Common::swap32(&data[idx * 4]));
-      };
-      // Capture ALL 12 floats of the 3x4 position matrix.
-      // Row-major layout: [m00 m01 m02 m03]  [m10 m11 m12 m13]  [m20 m21 m22 m23]
-      // This handles rotation, skew, and arbitrary linear transforms —
-      // not just scale+translate.
-      for (int i = 0; i < 12; i++) m_pos_mtx[i] = rf(i);
-      // Also keep the convenience aliases for backward compat
-      m_pos_sx = rf(0); m_pos_tx = rf(3);
-      m_pos_sy = rf(5); m_pos_ty = rf(7);
-      m_pos_tz = rf(11);
+      for (int i = 0; i < count && (address + i) < 0x0100; i++)
+      {
+        m_pos_matrices[address + i] = std::bit_cast<float>(Common::swap32(&data[i * 4]));
+      }
+
+      // Convenience aliases for PNMTX0 backward compat
+      m_pos_sx = m_pos_matrices[0]; m_pos_tx = m_pos_matrices[3];
+      m_pos_sy = m_pos_matrices[5]; m_pos_ty = m_pos_matrices[7];
+      m_pos_tz = m_pos_matrices[11];
     }
     // Track GX viewport (XF 0x101A-0x101F: wd, ht, zRange, xOrig, yOrig, farZ)
     // The viewport transform maps clip coords to screen pixels:
@@ -1138,8 +1140,13 @@ public:
       VertexInfo vi{};
       u32 off = v * vertex_size;
 
-      // Skip pos/tex matrix indices
-      if (vtx_desc.low.PosMatIdx) off += 1;
+      // Read pos matrix idx
+      vi.pos_idx = m_cpmem.matrix_index_a.PosNormalMtxIdx; // Default
+      if (vtx_desc.low.PosMatIdx)
+      {
+        vi.pos_idx = vertex_data[off];
+        off += 1;
+      }
       for (auto idx : vtx_desc.low.TexMatIdx)
       {
         if (idx) off += 1;
@@ -1760,6 +1767,7 @@ public:
   struct VertexInfo
   {
     float px = 0, py = 0, pz = 0;
+    u32 pos_idx = 0;
     u8 cr = 0, cg = 0, cb = 0, ca = 0;
     float uvs[8][2] = {};  // up to 8 UV sets
     bool has_pos = false, has_color = false;
@@ -1770,7 +1778,7 @@ public:
   bool m_has_pos_matrix = false;
   float m_pos_tx = 0, m_pos_ty = 0, m_pos_tz = 0;
   float m_pos_sx = 1, m_pos_sy = 1;
-  float m_pos_mtx[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};  // Full 3x4 position matrix
+  float m_pos_matrices[268] = {};
   bool m_genmode_set = false;
   u32 m_num_tev_stages = 0;
   bool m_tex_set[8] = {};
@@ -2053,6 +2061,11 @@ void FIFOAnalyzer::ExportScene()
   if (dir.isEmpty())
     return;
 
+  ExportSceneTo(dir);
+}
+
+void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
+{
   const std::filesystem::path export_dir(dir.toStdString());
   const std::filesystem::path tex_folder = export_dir / "textures";
   std::filesystem::create_directories(tex_folder);
@@ -2071,6 +2084,13 @@ void FIFOAnalyzer::ExportScene()
   std::ostringstream json;
   json << "{\n";
   json << "  \"exportVersion\": 1,\n";
+
+  std::ostringstream html;
+  html << "<!DOCTYPE html>\n<html>\n<head>\n<style>\n";
+  html << "  body { background: #333; overflow: hidden; margin: 0; padding: 0; font-family: sans-serif; }\n";
+  html << "  #scene-container { position: relative; width: 608px; height: 456px; margin: 20px auto; background: black; overflow: hidden; box-shadow: 0 0 20px rgba(0,0,0,0.5); }\n";
+  html << "  .quad { position: absolute; transform-origin: top left; image-rendering: pixelated; }\n";
+  html << "</style>\n</head>\n<body>\n<div id=\"scene-container\">\n";
   json << "  \"frameCount\": " << frame_count << ",\n";
   json << "  \"frames\": [\n";
 
@@ -2251,15 +2271,21 @@ void FIFOAnalyzer::ExportScene()
       // Step 1: Full 3x4 model-view matrix multiply (handles rotation/skew/mirror)
       // Step 2: Orthographic projection
       // Step 3: Viewport transform
-      auto transform_vert = [&](float px, float py) -> std::pair<float, float> {
-        const float* m = summary_cb.m_pos_mtx;
-        float mv_x = m[0]*px + m[1]*py + m[3];   // m00*x + m01*y + m03
-        float mv_y = m[4]*px + m[5]*py + m[7];   // m10*x + m11*y + m13
+      auto transform_vert = [&](float px, float py, float pz, u32 pos_idx) -> std::pair<float, float> {
+        const float* m = &summary_cb.m_pos_matrices[(pos_idx & 0x3f) * 4];
+        float mv_x = m[0]*px + m[1]*py + m[2]*pz + m[3];
+        float mv_y = m[4]*px + m[5]*py + m[6]*pz + m[7];
         float clip_x = mv_x, clip_y = mv_y;
-        if (summary_cb.m_proj_set && summary_cb.m_proj_type == 1)
+        if (summary_cb.m_proj_set && summary_cb.m_proj_type == 1) // orthographic
         {
           clip_x = mv_x * summary_cb.m_proj_params[0] + summary_cb.m_proj_params[1];
           clip_y = mv_y * summary_cb.m_proj_params[2] + summary_cb.m_proj_params[3];
+        }
+        else if (summary_cb.m_proj_set && summary_cb.m_proj_type == 0) // perspective
+        {
+          float mv_z = m[8]*px + m[9]*py + m[10]*pz + m[11];
+          clip_x = (mv_x * summary_cb.m_proj_params[0] + mv_z * summary_cb.m_proj_params[1]) / -mv_z;
+          clip_y = (mv_y * summary_cb.m_proj_params[2] + mv_z * summary_cb.m_proj_params[3]) / -mv_z;
         }
         float sx = clip_x * summary_cb.m_vp_wd + summary_cb.m_vp_x_orig;
         float sy = clip_y * summary_cb.m_vp_ht + summary_cb.m_vp_y_orig;
@@ -2270,7 +2296,7 @@ void FIFOAnalyzer::ExportScene()
       for (const auto& v : summary_cb.m_vertices)
       {
         if (!v.has_pos) continue;
-        auto [sx, sy] = transform_vert(v.px, v.py);
+        auto [sx, sy] = transform_vert(v.px, v.py, v.pz, v.pos_idx);
 
         // Bounding box update
         min_x = std::min(min_x, sx);
@@ -2351,11 +2377,11 @@ void FIFOAnalyzer::ExportScene()
       // Position matrix
       if (summary_cb.m_has_pos_matrix)
       {
-        json << fmt::format("          \"translateX\": {:.2f},\n", summary_cb.m_pos_tx);
-        json << fmt::format("          \"translateY\": {:.2f},\n", summary_cb.m_pos_ty);
-        json << fmt::format("          \"translateZ\": {:.2f},\n", summary_cb.m_pos_tz);
-        json << fmt::format("          \"scaleX\": {:.4f},\n", summary_cb.m_pos_sx);
-        json << fmt::format("          \"scaleY\": {:.4f},\n", summary_cb.m_pos_sy);
+        json << fmt::format("          \"translateX\": {:.2f},\n", summary_cb.m_pos_matrices[3]);
+        json << fmt::format("          \"translateY\": {:.2f},\n", summary_cb.m_pos_matrices[7]);
+        json << fmt::format("          \"translateZ\": {:.2f},\n", summary_cb.m_pos_matrices[11]);
+        json << fmt::format("          \"scaleX\": {:.4f},\n", summary_cb.m_pos_matrices[0]);
+        json << fmt::format("          \"scaleY\": {:.4f},\n", summary_cb.m_pos_matrices[5]);
       }
 
       // Textures
@@ -2576,6 +2602,113 @@ void FIFOAnalyzer::ExportScene()
       json << "          \"drawOrder\": " << object_idx << "\n";
       json << "        }";
 
+      if (has_bounds)
+      {
+        float w = max_x - min_x;
+        float h = max_y - min_y;
+        if (w > 0 && h > 0 && w < 10000 && h < 10000)
+        {
+          std::string html_style = fmt::format(
+              "left: {:.2f}px; top: {:.2f}px; width: {:.2f}px; height: {:.2f}px; z-index: {}; ",
+              min_x, min_y, w, h, object_idx);
+          
+          bool has_tex = false;
+          for (int i = 0; i < 8; i++)
+          {
+            if (summary_cb.m_tex_set[i])
+            {
+              auto it = tex_addr_to_filename.find(summary_cb.m_tex_addr[i]);
+              std::string fname = (it != tex_addr_to_filename.end()) ? it->second :
+                  fmt::format("tex_0x{:08X}_{}x{}.png", summary_cb.m_tex_addr[i],
+                              summary_cb.m_tex_width[i], summary_cb.m_tex_height[i]);
+              html_style += fmt::format("background-image: url('textures/{}'); ", fname);
+              if (has_uvs)
+              {
+                float uv_w = uv_br_u - uv_tl_u;
+                float uv_h = uv_br_v - uv_tl_v;
+                if (uv_w != 0 && uv_h != 0)
+                {
+                  float bg_w = w / uv_w;
+                  float bg_h = h / uv_h;
+                  float bg_x = -uv_tl_u * bg_w;
+                  float bg_y = -uv_tl_v * bg_h;
+                  html_style += fmt::format("background-size: {:.2f}px {:.2f}px; ", bg_w, bg_h);
+                  html_style += fmt::format("background-position: {:.2f}px {:.2f}px; ", bg_x, bg_y);
+                  
+                  int wrapS = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_s[i] : 0;
+                  int wrapT = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_t[i] : 0;
+                  std::string repeat = "no-repeat";
+                  if (wrapS == 1 && wrapT == 1) repeat = "repeat";
+                  else if (wrapS == 1) repeat = "repeat-x";
+                  else if (wrapT == 1) repeat = "repeat-y";
+                  html_style += fmt::format("background-repeat: {}; ", repeat);
+                }
+              }
+              has_tex = true;
+              break;
+            }
+          }
+          
+          int div_r = 255, div_g = 255, div_b = 255, div_a = 255;
+          bool color_found = false;
+          auto decode_reg_html = [](u32 ra, u32 bg, int& r, int& g, int& b, int& a) {
+            r = std::clamp(int(ra & 0x7FF), 0, 255);
+            a = std::clamp(int((ra >> 12) & 0x7FF), 0, 255);
+            b = std::clamp(int(bg & 0x7FF), 0, 255);
+            g = std::clamp(int((bg >> 12) & 0x7FF), 0, 255);
+          };
+          for (int i : {1, 0, 2}) {
+            if (summary_cb.m_tev_color_set[i] || summary_cb.m_tev_konst_set[i]) {
+                int tr, tg, tb, ta;
+                if (summary_cb.m_tev_color_set[i])
+                    decode_reg_html(summary_cb.m_tev_color_ra[i], summary_cb.m_tev_color_bg[i], tr, tg, tb, ta);
+                else
+                    decode_reg_html(summary_cb.m_tev_konst_ra[i], summary_cb.m_tev_konst_bg[i], tr, tg, tb, ta);
+                div_r = tr; div_g = tg; div_b = tb; div_a = ta;
+                color_found = true;
+                break;
+            }
+          }
+
+          if (color_found)
+          {
+            html_style += fmt::format("background-color: rgba({},{},{},{:.2f}); ", div_r, div_g, div_b, div_a / 255.0f);
+            if (has_tex) html_style += "background-blend-mode: multiply; ";
+          }
+          else if (!summary_cb.m_vertices.empty() && summary_cb.m_vertices[0].has_color)
+          {
+            auto& v = summary_cb.m_vertices[0];
+            html_style += fmt::format("background-color: rgba({},{},{},{:.2f}); ", v.cr, v.cg, v.cb, v.ca / 255.0f);
+            if (has_tex) html_style += "background-blend-mode: multiply; ";
+          }
+          else if (!has_tex)
+          {
+            html_style += "background-color: rgba(255,255,255,1.0); ";
+          }
+
+          // Apply scissor clip if set
+          if (summary_cb.m_scissor_set)
+          {
+             ScissorPos stl; stl.hex = summary_cb.m_scissor_tl;
+             ScissorPos sbr; sbr.hex = summary_cb.m_scissor_br;
+             float sx0 = static_cast<float>(stl.x.Value());
+             float sy0 = static_cast<float>(stl.y.Value());
+             float sx1 = static_cast<float>(sbr.x.Value()) + 1.0f;
+             float sy1 = static_cast<float>(sbr.y.Value()) + 1.0f;
+             float rx0 = sx0 - min_x;
+             float ry0 = sy0 - min_y;
+             float rx1 = sx1 - min_x;
+             float ry1 = sy1 - min_y;
+             if (rx0 > 0 || ry0 > 0 || rx1 < w || ry1 < h) {
+                  html_style += fmt::format("clip-path: polygon({:.1f}px {:.1f}px, {:.1f}px {:.1f}px, {:.1f}px {:.1f}px, {:.1f}px {:.1f}px); ",
+                      rx0, ry0, rx1, ry0, rx1, ry1, rx0, ry1);
+             }
+          }
+
+          html << "    <div class=\"quad\" style=\"" << html_style << "\"></div>\n";
+        }
+      }
+
       object_idx++;
       total_objects++;
     }
@@ -2596,9 +2729,22 @@ void FIFOAnalyzer::ExportScene()
     json_file.close();
   }
 
-  QMessageBox::information(this, tr("Export Scene"),
-      tr("Exported scene to:\n%1\n\n%2 objects processed\n%3 textures exported")
-          .arg(QString::fromStdString(json_path.string()))
-          .arg(total_objects)
-          .arg(tex_export_count));
+  html << "</div>\n</body>\n</html>\n";
+  const std::filesystem::path html_path = export_dir / "scene.html";
+  std::ofstream html_file(html_path.string());
+  if (html_file.is_open())
+  {
+    html_file << html.str();
+    html_file.close();
+  }
+
+  if (!headless)
+  {
+    QMessageBox::information(this, tr("Export Scene"),
+        tr("Exported scene to:\n%1\nAnd HTML to:\n%2\n\n%3 objects processed\n%4 textures exported")
+            .arg(QString::fromStdString(json_path.string()))
+            .arg(QString::fromStdString(html_path.string()))
+            .arg(total_objects)
+            .arg(tex_export_count));
+  }
 }

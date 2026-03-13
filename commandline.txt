@@ -1,0 +1,1 @@
+./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin --batch --exec Files/HomeMenuFIFO_Frame1.dff --export-fifo Files/ExportTest

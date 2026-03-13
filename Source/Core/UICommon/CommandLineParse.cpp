@@ -115,6 +115,11 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
     parser->add_option("-b", "--batch")
         .action("store_true")
         .help("Run Dolphin without the user interface (Requires --exec or --nand-title)");
+    parser->add_option("--export-fifo")
+        .action("store")
+        .metavar("<dir>")
+        .type("string")
+        .help("Export FIFO (DFF) as HTML scene to the given directory");
     parser->add_option("-c", "--confirm").action("store_true").help("Set Confirm on Stop");
   }
 

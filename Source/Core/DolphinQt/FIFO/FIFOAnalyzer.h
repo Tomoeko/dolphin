@@ -29,6 +29,7 @@ public:
   ~FIFOAnalyzer() override;
 
   void Update();
+  void ExportSceneTo(const QString& dir, bool headless = false);
 
 private:
   void CreateWidgets();
