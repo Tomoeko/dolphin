@@ -801,7 +801,8 @@ namespace
 class SummaryCallback : public OpcodeDecoder::Callback
 {
 public:
-  explicit SummaryCallback(const CPState& cpmem) : m_cpmem(cpmem) {}
+  SummaryCallback(const CPState& cpmem, const FifoFrameInfo& frame_info)
+      : m_frame_info(frame_info), m_cpmem(cpmem) {}
 
   void Reset()
   {
@@ -854,6 +855,13 @@ public:
     for (int i = 0; i < 8; i++) { m_ksel[i] = 0; m_ksel_set[i] = false; }
     // SU coord scale
     for (int i = 0; i < 8; i++) { m_su_ssize[i] = 0; m_su_tsize[i] = 0; m_su_set[i] = false; }
+    for (int i = 0; i < 8; i++)
+    {
+      m_tex_tlut_set[i] = false;
+      m_tex_tlut_tmem[i] = 0;
+      m_tex_tlut_fmt[i] = TLUTFormat::IA8;
+    }
+    m_tlut_load_addr = 0;
     m_prim_count = 0;
     m_primitives.clear();
     m_chan0_color_src = -1;
@@ -1105,6 +1113,48 @@ public:
       m_ksel[idx] = value;
       m_ksel_set[idx] = true;
     }
+    // TLUT Load address
+    if (command == BPMEM_LOADTLUT0)
+    {
+      m_tlut_load_addr = (value & 0x01FFFFFF) << 5;
+    }
+    if (command == BPMEM_LOADTLUT1)
+    {
+      BPU_LoadTlutInfo info; info.hex = value;
+      u32 tmem_addr = info.tmem_addr << 9; // 512B blocks? wait, check bitfield
+      u32 count = info.tmem_line_count * 16; // 16 entries per line for 32B lines?
+      
+      // Capture the data from memory updates
+      for (const auto& mem_update : m_frame_info.memoryUpdates)
+      {
+        if (mem_update.type != MemoryUpdate::Type::TextureMap) continue;
+        if (m_tlut_load_addr >= mem_update.address && 
+            m_tlut_load_addr + count * 2 <= mem_update.address + mem_update.data.size())
+        {
+          std::vector<u8> data(mem_update.data.begin() + (m_tlut_load_addr - mem_update.address),
+                               mem_update.data.begin() + (m_tlut_load_addr - mem_update.address) + count * 2);
+          m_tlut_bank[tmem_addr] = std::move(data);
+          break;
+        }
+      }
+    }
+    // Texture TLUT settings (TMEM offset and format)
+    if (command >= BPMEM_TX_SETTLUT && command < BPMEM_TX_SETTLUT + 4)
+    {
+      int unit = command - BPMEM_TX_SETTLUT;
+      TexTLUT tt; tt.hex = value;
+      m_tex_tlut_set[unit] = true;
+      m_tex_tlut_tmem[unit] = tt.tmem_offset << 9;
+      m_tex_tlut_fmt[unit] = tt.tlut_format;
+    }
+    if (command >= BPMEM_TX_SETTLUT_4 && command < BPMEM_TX_SETTLUT_4 + 4)
+    {
+      int unit = command - BPMEM_TX_SETTLUT_4 + 4;
+      TexTLUT tt; tt.hex = value;
+      m_tex_tlut_set[unit] = true;
+      m_tex_tlut_tmem[unit] = tt.tmem_offset << 9;
+      m_tex_tlut_fmt[unit] = tt.tlut_format;
+    }
     // SU coord scale (SSIZE at 0x30,0x32,...0x3E; TSIZE at 0x31,0x33,...0x3F)
     if (command >= BPMEM_SU_SSIZE && command < BPMEM_SU_SSIZE + 16)
     {
@@ -1134,13 +1184,60 @@ public:
     const auto& vtx_desc = m_cpmem.vtx_desc;
     const auto& vtx_attr = m_cpmem.vtx_attr[vat];
 
+    u32 off = 0;
+
+    auto get_data_ptr = [&](VertexComponentFormat vcf, CPArray array, u32 size) -> const u8* {
+      if (vcf == VertexComponentFormat::Direct)
+      {
+        const u8* ptr = &vertex_data[off];
+        off += size;
+        return ptr;
+      }
+      else if (vcf == VertexComponentFormat::Index8 || vcf == VertexComponentFormat::Index16)
+      {
+        u32 index =
+            (vcf == VertexComponentFormat::Index8) ? vertex_data[off] : Common::swap16(&vertex_data[off]);
+        off += (vcf == VertexComponentFormat::Index8) ? 1 : 2;
+
+        u32 stride = m_cpmem.array_strides[array];
+        u32 addr = m_cpmem.array_bases[array] + index * stride;
+
+        for (const auto& mem_update : m_frame_info.memoryUpdates)
+        {
+          if (mem_update.type != MemoryUpdate::Type::VertexStream)
+            continue;
+          if (addr >= mem_update.address && addr + size <= mem_update.address + mem_update.data.size())
+          {
+            return &mem_update.data[addr - mem_update.address];
+          }
+        }
+      }
+      return nullptr;
+    };
+
+    auto read_float = [&](const u8* ptr, ComponentFormat fmt, u32 shift) -> float {
+      if (!ptr)
+        return 0.0f;
+      if (fmt == ComponentFormat::Float)
+        return std::bit_cast<float>(Common::swap32(ptr));
+      else if (fmt == ComponentFormat::Short)
+        return static_cast<float>(static_cast<s16>(Common::swap16(ptr))) /
+               static_cast<float>(1 << shift);
+      else if (fmt == ComponentFormat::UShort)
+        return static_cast<float>(Common::swap16(ptr)) / static_cast<float>(1 << shift);
+      else if (fmt == ComponentFormat::Byte)
+        return static_cast<float>(static_cast<s8>(*ptr)) / static_cast<float>(1 << shift);
+      else if (fmt == ComponentFormat::UByte)
+        return static_cast<float>(*ptr) / static_cast<float>(1 << shift);
+      return 0.0f;
+    };
+
     for (u32 v = 0; v < num_vertices; v++)
     {
       VertexInfo vi{};
-      u32 off = v * vertex_size;
 
       // Read pos matrix idx
-      vi.pos_idx = m_cpmem.matrix_index_a.PosNormalMtxIdx; // Default
+      vi.pos_idx = m_cpmem.matrix_index_a.PosNormalMtxIdx;  // Default
       if (vtx_desc.low.PosMatIdx)
       {
         vi.pos_idx = vertex_data[off];
@@ -1148,44 +1245,40 @@ public:
       }
       for (auto idx : vtx_desc.low.TexMatIdx)
       {
-        if (idx) off += 1;
+        if (idx)
+          off += 1;
       }
 
       // Read position
-      if (vtx_desc.low.Position == VertexComponentFormat::Direct)
+      if (vtx_desc.low.Position != VertexComponentFormat::NotPresent)
       {
         bool xyz = (vtx_attr.g0.PosElements == CoordComponentCount::XYZ);
-        if (vtx_attr.g0.PosFormat == ComponentFormat::Float)
+        u32 count = xyz ? 3 : 2;
+        u32 size = count * GetElementSize(vtx_attr.g0.PosFormat);
+        const u8* ptr = get_data_ptr(vtx_desc.low.Position, CPArray::Position, size);
+
+        if (ptr)
         {
-          vi.px = std::bit_cast<float>(Common::swap32(&vertex_data[off])); off += 4;
-          vi.py = std::bit_cast<float>(Common::swap32(&vertex_data[off])); off += 4;
+          u32 elem_sz = GetElementSize(vtx_attr.g0.PosFormat);
+          vi.px = read_float(ptr, vtx_attr.g0.PosFormat, vtx_attr.g0.PosFrac);
+          vi.py = read_float(ptr + elem_sz, vtx_attr.g0.PosFormat, vtx_attr.g0.PosFrac);
           if (xyz)
-          {
-            vi.pz = std::bit_cast<float>(Common::swap32(&vertex_data[off])); off += 4;
-          }
+            vi.pz = read_float(ptr + 2 * elem_sz, vtx_attr.g0.PosFormat, vtx_attr.g0.PosFrac);
           vi.has_pos = true;
         }
-        else
-        {
-          // Skip non-float positions
-          u32 count = xyz ? 3 : 2;
-          off += count * GetElementSize(vtx_attr.g0.PosFormat);
-        }
-      }
-      else if (vtx_desc.low.Position != VertexComponentFormat::NotPresent)
-      {
-        // Indexed — skip
-        off += (vtx_desc.low.Position == VertexComponentFormat::Index8) ? 1 : 2;
       }
 
       // Skip normals
       if (vtx_desc.low.Normal != VertexComponentFormat::NotPresent)
       {
+        u32 ncount = 3;
+        if (vtx_attr.g0.NormalElements == NormalComponentCount::NTB)
+          ncount = 9;
+        u32 size = ncount * GetElementSize(vtx_attr.g0.NormalFormat);
+
         if (vtx_desc.low.Normal == VertexComponentFormat::Direct)
         {
-          u32 ncount = 3;
-          if (vtx_attr.g0.NormalElements == NormalComponentCount::NTB) ncount = 9;
-          off += ncount * GetElementSize(vtx_attr.g0.NormalFormat);
+          off += size;
         }
         else
         {
@@ -1200,58 +1293,75 @@ public:
       // Read colors
       for (u32 c = 0; c < vtx_desc.low.Color.Size(); c++)
       {
-        if (vtx_desc.low.Color[c] == VertexComponentFormat::Direct)
+        if (vtx_desc.low.Color[c] == VertexComponentFormat::NotPresent)
+          continue;
+
+        ColorFormat cfmt = vtx_attr.GetColorFormat(c);
+        static constexpr u32 csizes[] = {2, 3, 4, 2, 3, 4};
+        u32 size = (static_cast<u32>(cfmt) <= 5) ? csizes[static_cast<u32>(cfmt)] : 0;
+
+        const u8* ptr = get_data_ptr(vtx_desc.low.Color[c],
+                                     static_cast<CPArray>(static_cast<u8>(CPArray::Color0) + c), size);
+
+        if (ptr && c == 0)  // Only save color 0 for now
         {
-          ColorFormat cfmt = vtx_attr.GetColorFormat(c);
-          if (cfmt == ColorFormat::RGBA8888 && c == 0)
+          if (cfmt == ColorFormat::RGBA8888)
           {
-            vi.cr = vertex_data[off]; vi.cg = vertex_data[off+1];
-            vi.cb = vertex_data[off+2]; vi.ca = vertex_data[off+3];
-            vi.has_color = true;
-            off += 4;
+            vi.cr = ptr[0]; vi.cg = ptr[1]; vi.cb = ptr[2]; vi.ca = ptr[3];
           }
-          else
+          else if (cfmt == ColorFormat::RGB888 || cfmt == ColorFormat::RGB888x)
           {
-            static constexpr u32 csizes[] = {2, 3, 4, 2, 3, 4};
-            if (static_cast<u32>(cfmt) <= 5) off += csizes[static_cast<u32>(cfmt)];
+            vi.cr = ptr[0]; vi.cg = ptr[1]; vi.cb = ptr[2]; vi.ca = 255;
           }
+          else if (cfmt == ColorFormat::RGB565)
+          {
+            u16 color = Common::swap16(*reinterpret_cast<const u16*>(ptr));
+            vi.cr = ((color >> 11) & 0x1F) * 255 / 31;
+            vi.cg = ((color >> 5) & 0x3F) * 255 / 63;
+            vi.cb = ((color >> 0) & 0x1F) * 255 / 31;
+            vi.ca = 255;
+          }
+          else if (cfmt == ColorFormat::RGBA4444)
+          {
+            u16 color = Common::swap16(*reinterpret_cast<const u16*>(ptr));
+            vi.cr = ((color >> 12) & 0xF) * 255 / 15;
+            vi.cg = ((color >> 8) & 0xF) * 255 / 15;
+            vi.cb = ((color >> 4) & 0xF) * 255 / 15;
+            vi.ca = ((color >> 0) & 0xF) * 255 / 15;
+          }
+          else if (cfmt == ColorFormat::RGBA6666)
+          {
+            u32 color = Common::swap32(*reinterpret_cast<const u32*>(ptr)) >> 8;  // 24 bits
+            vi.cr = ((color >> 18) & 0x3F) * 255 / 63;
+            vi.cg = ((color >> 12) & 0x3F) * 255 / 63;
+            vi.cb = ((color >> 6) & 0x3F) * 255 / 63;
+            vi.ca = ((color >> 0) & 0x3F) * 255 / 63;
+          }
+          vi.has_color = true;
         }
-        else if (vtx_desc.low.Color[c] == VertexComponentFormat::Index8)
-          off += 1;
-        else if (vtx_desc.low.Color[c] == VertexComponentFormat::Index16)
-          off += 2;
       }
 
       // Read all tex coord sets (UV0, UV1, ...)
       for (u32 t = 0; t < vtx_desc.high.TexCoord.Size(); t++)
       {
-        if (vtx_desc.high.TexCoord[t] == VertexComponentFormat::Direct)
+        if (vtx_desc.high.TexCoord[t] == VertexComponentFormat::NotPresent)
+          continue;
+
+        u32 tcount = (vtx_attr.GetTexElements(t) == TexComponentCount::ST) ? 2 : 1;
+        ComponentFormat tfmt = vtx_attr.GetTexFormat(t);
+        u32 size = tcount * GetElementSize(tfmt);
+
+        const u8* ptr = get_data_ptr(vtx_desc.high.TexCoord[t],
+                                     static_cast<CPArray>(static_cast<u8>(CPArray::TexCoord0) + t), size);
+
+        if (ptr && t < 8 && vi.has_pos)
         {
-          u32 tcount = (vtx_attr.GetTexElements(t) == TexComponentCount::ST) ? 2 : 1;
-          ComponentFormat tfmt = vtx_attr.GetTexFormat(t);
-          if (t < 8 && vi.has_pos)
-          {
-            if (tfmt == ComponentFormat::Float)
-            {
-              vi.uvs[t][0] = std::bit_cast<float>(Common::swap32(&vertex_data[off]));
-              if (tcount >= 2) vi.uvs[t][1] = std::bit_cast<float>(Common::swap32(&vertex_data[off+4]));
-              vi.has_uv_set[t] = true;
-            }
-            else if (tfmt == ComponentFormat::UShort)
-            {
-              u32 shift = vtx_attr.GetTexFrac(t);
-              u16 raw_u = Common::swap16(&vertex_data[off]);
-              u16 raw_v = (tcount >= 2) ? Common::swap16(&vertex_data[off+2]) : 0;
-              vi.uvs[t][0] = static_cast<float>(raw_u) / static_cast<float>(1 << shift);
-              vi.uvs[t][1] = static_cast<float>(raw_v) / static_cast<float>(1 << shift);
-              vi.has_uv_set[t] = true;
-            }
-          }
-          off += tcount * GetElementSize(tfmt);
-        }
-        else if (vtx_desc.high.TexCoord[t] != VertexComponentFormat::NotPresent)
-        {
-          off += (vtx_desc.high.TexCoord[t] == VertexComponentFormat::Index8) ? 1 : 2;
+          u32 elem_sz = GetElementSize(tfmt);
+          u32 shift = vtx_attr.GetTexFrac(t);
+          vi.uvs[t][0] = read_float(ptr, tfmt, shift);
+          if (tcount >= 2)
+            vi.uvs[t][1] = read_float(ptr + elem_sz, tfmt, shift);
+          vi.has_uv_set[t] = true;
         }
       }
 
@@ -1698,10 +1808,10 @@ public:
     {
       ScissorPos tl; tl.hex = m_scissor_tl;
       ScissorPos br; br.hex = m_scissor_br;
-      int x0 = static_cast<int>(tl.x.Value()) - 342;
-      int y0 = static_cast<int>(tl.y.Value()) - 342;
-      int x1 = static_cast<int>(br.x.Value()) - 341;
-      int y1 = static_cast<int>(br.y.Value()) - 341;
+      int x0 = static_cast<int>(tl.x.Value());
+      int y0 = static_cast<int>(tl.y.Value());
+      int x1 = static_cast<int>(br.x.Value());
+      int y1 = static_cast<int>(br.y.Value());
       ss << fmt::format("  ║ Scissor: ({},{}) - ({},{})  clip={}x{}\n",
                         x0, y0, x1, y1, x1-x0, y1-y0);
     }
@@ -1783,7 +1893,13 @@ public:
     std::vector<VertexInfo> vertices;
   };
 
+  const FifoFrameInfo& m_frame_info;
   CPState m_cpmem;
+  u32 m_tlut_load_addr = 0;
+  bool m_tex_tlut_set[8] = {};
+  u32 m_tex_tlut_tmem[8] = {};
+  TLUTFormat m_tex_tlut_fmt[8] = {};
+  std::map<u32, std::vector<u8>> m_tlut_bank;
   bool m_has_pos_matrix = false;
   float m_pos_tx = 0, m_pos_ty = 0, m_pos_tz = 0;
   float m_pos_sx = 1, m_pos_sy = 1;
@@ -1912,7 +2028,7 @@ void FIFOAnalyzer::ExportAll()
       object_idx++;
 
       // First pass: accumulate state for summary
-      auto summary_cb = SummaryCallback(frame_info.parts[end_part].m_cpmem);
+      auto summary_cb = SummaryCallback(frame_info.parts[end_part].m_cpmem, fifo_frame);
       summary_cb.Reset();
       {
         u32 soff = 0;
@@ -2113,7 +2229,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
     // Reset viewport/projection tracking at frame start so state
     // commands within this frame can set them properly.
     auto summary_cb_global = SummaryCallback(frame_info.parts.empty() ?
-        CPState{} : frame_info.parts[0].m_cpmem);
+        CPState{} : frame_info.parts[0].m_cpmem, fifo_frame);
     summary_cb_global.ResetGlobalState();
 
     for (u32 part_nr = 0; part_nr < frame_info.parts.size(); part_nr++)
@@ -2139,7 +2255,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       const u32 obj_size = obj_end - obj_start;
 
       // Parse object state
-      auto summary_cb = SummaryCallback(frame_info.parts[end_part].m_cpmem);
+      auto summary_cb = SummaryCallback(frame_info.parts[end_part].m_cpmem, fifo_frame);
       summary_cb.Reset();
       // Inherit global viewport/projection state
       summary_cb.m_vp_set = summary_cb_global.m_vp_set;
@@ -2228,10 +2344,22 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
         if (!tex_data)
           continue;
 
+        // Find TLUT if paletted
+        const u8* tlut_data = nullptr;
+        TLUTFormat tlut_fmt = TLUTFormat::IA8;
+        if (tex_fmt == TextureFormat::C4 || tex_fmt == TextureFormat::C8 || tex_fmt == TextureFormat::C14X2)
+        {
+          u32 tmem_addr = summary_cb.m_tex_tlut_tmem[i];
+          tlut_fmt = summary_cb.m_tex_tlut_fmt[i];
+          auto it = summary_cb.m_tlut_bank.find(tmem_addr);
+          if (it != summary_cb.m_tlut_bank.end())
+            tlut_data = it->second.data();
+        }
+
         const u32 stride = expanded_w * 4;
         std::vector<u8> decoded(stride * expanded_h);
-        TexDecoder_Decode(decoded.data(), tex_data, expanded_w, expanded_h, tex_fmt, nullptr,
-                          TLUTFormat::IA8);
+        TexDecoder_Decode(decoded.data(), tex_data, expanded_w, expanded_h, tex_fmt, tlut_data,
+                          tlut_fmt);
 
         // Build filename
         std::string tex_name;
@@ -2633,434 +2761,323 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
     json_file.close();
   }
 
-  // Build canvas-based HTML with embedded JSON and JS TEV simulator
+  // Build WebGL-based HTML with embedded JSON and GX TEV shader
   const std::string json_data = json.str();
-  html << "<!DOCTYPE html>\n<html>\n<head>\n<style>\n";
-  html << "  body { background: #222; margin: 0; padding: 20px; font-family: monospace; }\n";
-  html << "  canvas { display: block; margin: 0 auto; image-rendering: pixelated; ";
-  html << "box-shadow: 0 0 20px rgba(0,0,0,0.5); }\n";
-  html << "  #status { color: #aaa; text-align: center; margin-top: 10px; font-size: 12px; }\n";
+  html << "<!DOCTYPE html>\n<html>\n<head>\n";
+  html << "<title>Dolphin FIFO Scene Export (WebGL)</title>\n";
+  html << "<style>\n";
+  html << "  body { background: #111; margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; }\n";
+  html << "  #container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }\n";
+  html << "  canvas { image-rendering: pixelated; box-shadow: 0 0 40px rgba(0,0,0,0.8); background: #000; cursor: crosshair; }\n";
+  html << "  #ui { position: absolute; bottom: 20px; left: 20px; color: #fff; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; font-size: 13px; line-height: 1.6; max-width: 300px; backdrop-filter: blur(5px); transition: opacity 0.3s; }\n";
+  html << "  #ui b { color: #0cf; }\n";
   html << "</style>\n</head>\n<body>\n";
-  html << "<canvas id=\"scene\" width=\"608\" height=\"456\"></canvas>\n";
-  html << "<div id=\"status\">Loading textures...</div>\n";
+  html << "<div id=\"container\">\n";
+  html << "  <canvas id=\"scene\" width=\"640\" height=\"480\"></canvas>\n";
+  html << "  <div id=\"ui\">\n";
+  html << "    <b>Wii Frame Export (WebGL)</b><br/>\n";
+  html << "    <span id=\"status\">Initializing renderer...</span><br/>\n";
+  html << "    <small>Coords: <span id=\"coords\">0, 0</span> | Objects: <span id=\"obj-count\">0</span></small>\n";
+  html << "  </div>\n";
+  html << "</div>\n";
   html << "<script>\n";
   html << "const SCENE = " << json_data << ";\n";
   html << R"JS(
 const canvas = document.getElementById('scene');
-const ctx = canvas.getContext('2d');
-const W = 608, H = 456;
+const gl = canvas.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+const W = canvas.width, H = canvas.height;
 
-// GX EFB bias: hardware adds 342 to scissor/viewport coords
-const EFB_BIAS = 342;
+// WebGL Global State
+let texMap = {};
 
-// Load all textures, then render
+const VS_SRC = `
+  attribute vec2 a_pos;
+  attribute vec4 a_color;
+  attribute vec2 a_uv0, a_uv1, a_uv2, a_uv3, a_uv4, a_uv5, a_uv6, a_uv7;
+  varying vec4 v_color;
+  varying vec2 v_uvs[8];
+  void main() {
+    // Map hardware 342..982 -> -1..1
+    gl_Position = vec4(((a_pos.x - 342.0) / 320.0) - 1.0, 1.0 - ((a_pos.y - 342.0) / 240.0), 0.0, 1.0);
+    v_color = a_color;
+    v_uvs[0] = a_uv0; v_uvs[1] = a_uv1; v_uvs[2] = a_uv2; v_uvs[3] = a_uv3;
+    v_uvs[4] = a_uv4; v_uvs[5] = a_uv5; v_uvs[6] = a_uv6; v_uvs[7] = a_uv7;
+  }
+`;
+
+const FS_HEADER = `
+  precision mediump float;
+  varying vec4 v_color;
+  varying vec2 v_uvs[8];
+  uniform sampler2D u_tex[8];
+  uniform bool u_texEnabled[16];
+  uniform int u_texIndices[16];
+  uniform int u_uvIndices[16];
+  uniform ivec4 u_colorOps[16];
+  uniform ivec4 u_alphaOps[16];
+  uniform vec4 u_c[3]; 
+  uniform vec4 u_prev_init;
+  uniform vec4 u_k[16];
+  uniform int u_numStages;
+
+  vec3 getColor(int idx, vec4 prev, vec4 c0, vec4 c1, vec4 c2, vec4 tex, vec4 ras, vec4 konst) {
+    if (idx == 0) return prev.rgb;
+    if (idx == 1) return prev.aaa;
+    if (idx == 2) return c0.rgb;
+    if (idx == 3) return c0.aaa;
+    if (idx == 4) return c1.rgb;
+    if (idx == 5) return c1.aaa;
+    if (idx == 6) return c2.rgb;
+    if (idx == 7) return c2.aaa;
+    if (idx == 8) return tex.rgb;
+    if (idx == 9) return tex.aaa;
+    if (idx == 10) return ras.rgb;
+    if (idx == 11) return ras.aaa;
+    if (idx == 12) return vec3(1.0);
+    if (idx == 13) return vec3(0.5);
+    if (idx == 14) return konst.rgb;
+    return vec3(0.0);
+  }
+
+  float getAlpha(int idx, vec4 prev, vec4 c0, vec4 c1, vec4 c2, vec4 tex, vec4 ras, vec4 konst) {
+    if (idx == 0) return prev.a;
+    if (idx == 1) return c0.a;
+    if (idx == 2) return c1.a;
+    if (idx == 3) return c2.a;
+    if (idx == 4) return tex.a;
+    if (idx == 5) return ras.a;
+    if (idx == 6) return konst.a;
+    return 0.0;
+  }
+`;
+
+function buildFS() {
+    let s = FS_HEADER + "void main() {\n  vec4 prev = u_prev_init;\n  vec4 ras = v_color;\n";
+    for(let i=0; i<16; i++) {
+        s += `  if (${i} < u_numStages) {\n`;
+        s += `    vec4 tex = vec4(1.0);\n`;
+        s += `    if (u_texEnabled[${i}]) {\n`;
+        s += `      int texIdx = u_texIndices[${i}];\n`;
+        s += `      int uvIdx = u_uvIndices[${i}];\n`;
+        s += `      vec2 uv = vec2(0.0);\n`;
+        for(let u=0; u<8; u++) s += `      if (uvIdx == ${u}) uv = v_uvs[${u}];\n`;
+        for(let t=0; t<8; t++) s += `      if (texIdx == ${t}) tex = texture2D(u_tex[${t}], uv);\n`;
+        s += `    }\n`;
+        s += `    vec4 konst = u_k[${i}];\n`;
+        s += `    ivec4 cOp = u_colorOps[${i}];\n`;
+        s += `    ivec4 aOp = u_alphaOps[${i}];\n`;
+        s += `    vec3 a = getColor(cOp.x, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 b = getColor(cOp.y, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 c = getColor(cOp.z, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 d = getColor(cOp.w, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    prev.rgb = clamp(d + mix(a, b, c), 0.0, 1.0);\n`;
+        s += `    float aa = getAlpha(aOp.x, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ab = getAlpha(aOp.y, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ac = getAlpha(aOp.z, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ad = getAlpha(aOp.w, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    prev.a = clamp(ad + mix(aa, ab, ac), 0.0, 1.0);\n`;
+        s += `  }\n`;
+    }
+    s += "  if (prev.a < 0.01) discard;\n  gl_FragColor = prev;\n}";
+    return s;
+}
+
+const FS_SRC = buildFS();
+
+function createShader(gl, type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, VS_SRC));
+gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, FS_SRC));
+gl.linkProgram(program);
+gl.useProgram(program);
+
+const aPos = gl.getAttribLocation(program, "a_pos");
+const aColor = gl.getAttribLocation(program, "a_color");
+const aUv = [];
+for (let i = 0; i < 8; i++) {
+    aUv[i] = gl.getAttribLocation(program, `a_uv${i}`);
+}
+
+const uNumStages = gl.getUniformLocation(program, "u_numStages");
+const uC = gl.getUniformLocation(program, "u_c[0]");
+const uPrevInit = gl.getUniformLocation(program, "u_prev_init");
+const uK = gl.getUniformLocation(program, "u_k[0]");
+const uTex = [];
+for (let i = 0; i < 8; i++) {
+    uTex[i] = gl.getUniformLocation(program, `u_tex[${i}]`);
+}
+const uTexEnabled = gl.getUniformLocation(program, "u_texEnabled[0]");
+const uTexIndices = gl.getUniformLocation(program, "u_texIndices[0]");
+const uUvIndices = gl.getUniformLocation(program, "u_uvIndices[0]");
+const uColorOps = gl.getUniformLocation(program, "u_colorOps[0]");
+const uAlphaOps = gl.getUniformLocation(program, "u_alphaOps[0]");
+
+
+// Load Textures
 async function loadTextures(objects) {
-  const texMap = {};
   const promises = [];
+  const statusLabels = document.getElementById('status');
   for (const obj of objects) {
     for (const tex of (obj.textures || [])) {
       if (texMap[tex.file]) continue;
-      texMap[tex.file] = null;
       const p = new Promise(resolve => {
         const img = new Image();
-        img.onload = () => { texMap[tex.file] = img; resolve(); };
-        img.onerror = () => resolve();
+        img.onload = () => {
+          const t = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, tex.wrapS === 1 ? gl.REPEAT : (tex.wrapS === 2 ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE));
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, tex.wrapT === 1 ? gl.REPEAT : (tex.wrapT === 2 ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE));
+          texMap[tex.file] = t;
+          resolve();
+        };
+        img.onerror = () => {
+          console.warn("Failed to load texture:", tex.file);
+          resolve();
+        };
         img.src = 'textures/' + tex.file;
       });
       promises.push(p);
     }
   }
   await Promise.all(promises);
-  return texMap;
-}
-
-// Sample texture at UV coordinates, returns [r,g,b,a] 0-255
-function sampleTex(texImg, u, v, wrapS, wrapT) {
-  if (!texImg) return [255, 255, 255, 255];
-
-  // Apply wrap mode: 0=Clamp, 1=Repeat, 2=Mirror
-  function applyWrap(coord, mode) {
-    if (mode === 1) { coord = coord % 1; if (coord < 0) coord += 1; }
-    else if (mode === 2) {
-      coord = Math.abs(coord);
-      const i = Math.floor(coord);
-      coord = (i & 1) ? 1 - (coord - i) : (coord - i);
-    }
-    else { coord = Math.max(0, Math.min(1, coord)); }
-    return coord;
-  }
-
-  u = applyWrap(u, wrapS);
-  v = applyWrap(v, wrapT);
-
-  // Draw to offscreen canvas to get pixel data
-  if (!texImg._canvas) {
-    const c = document.createElement('canvas');
-    c.width = texImg.naturalWidth;
-    c.height = texImg.naturalHeight;
-    const tc = c.getContext('2d');
-    tc.drawImage(texImg, 0, 0);
-    texImg._data = tc.getImageData(0, 0, c.width, c.height);
-    texImg._canvas = c;
-  }
-
-  const data = texImg._data;
-  const px = Math.min(Math.floor(u * data.width), data.width - 1);
-  const py = Math.min(Math.floor(v * data.height), data.height - 1);
-  const idx = (py * data.width + px) * 4;
-  return [data.data[idx], data.data[idx+1], data.data[idx+2], data.data[idx+3]];
-}
-
-// TEV combiner: result = d + ((1-c)*a + c*b) + bias, then scale
-// For alpha: same formula but single channel
-function tevCombine(a, b, c, d, bias, op, scale, clamp) {
-  // result = d + (a*(1-c) + b*c) with bias and scale
-  let result = d + (a * (1 - c) + b * c);
-  if (bias === 1) result += 0.5;      // +0.5
-  else if (bias === 2) result -= 0.5; // -0.5
-  // bias === 3 is compare mode, handled separately
-
-  if (op === 1) result = d - (a * (1 - c) + b * c); // subtract
-
-  if (scale === 1) result *= 2;
-  else if (scale === 2) result *= 4;
-  else if (scale === 3) result *= 0.5;
-
-  if (clamp) result = Math.max(0, Math.min(1, result));
-  return result;
-}
-
-// Resolve a TEV color input index to [r,g,b] normalized 0-1
-// Color inputs: 0=prev, 1=prev.a, 2=c0, 3=c0.a, 4=c1, 5=c1.a,
-//   6=c2, 7=c2.a, 8=tex, 9=tex.a, 10=ras, 11=ras.a,
-//   12=ONE, 13=HALF, 14=konst, 15=ZERO
-function getColorInput(idx, regs, tex, ras, konst) {
-  const r = regs; // {prev, c0, c1, c2} each [r,g,b,a]
-  switch(idx) {
-    case 0: return [r.prev[0], r.prev[1], r.prev[2]];
-    case 1: return [r.prev[3], r.prev[3], r.prev[3]];
-    case 2: return [r.c0[0], r.c0[1], r.c0[2]];
-    case 3: return [r.c0[3], r.c0[3], r.c0[3]];
-    case 4: return [r.c1[0], r.c1[1], r.c1[2]];
-    case 5: return [r.c1[3], r.c1[3], r.c1[3]];
-    case 6: return [r.c2[0], r.c2[1], r.c2[2]];
-    case 7: return [r.c2[3], r.c2[3], r.c2[3]];
-    case 8: return [tex[0], tex[1], tex[2]];
-    case 9: return [tex[3], tex[3], tex[3]];
-    case 10: return [ras[0], ras[1], ras[2]];
-    case 11: return [ras[3], ras[3], ras[3]];
-    case 12: return [1, 1, 1]; // ONE (8/8)
-    case 13: return [0.5, 0.5, 0.5]; // HALF (4/8)
-    case 14: return [konst[0], konst[1], konst[2]];
-    case 15: return [0, 0, 0]; // ZERO
-    default: return [0, 0, 0];
-  }
-}
-
-// Resolve a TEV alpha input index to scalar 0-1
-// Alpha inputs: 0=prev, 1=c0, 2=c1, 3=c2, 4=tex, 5=ras, 6=konst, 7=zero
-function getAlphaInput(idx, regs, tex, ras, konst) {
-  switch(idx) {
-    case 0: return regs.prev[3];
-    case 1: return regs.c0[3];
-    case 2: return regs.c1[3];
-    case 3: return regs.c2[3];
-    case 4: return tex[3];
-    case 5: return ras[3];
-    case 6: return konst[3];
-    case 7: return 0;
-    default: return 0;
-  }
-}
-
-// Resolve konst color selection (kcsel) to [r,g,b,a] 0-1
-// KonstSel values: 0-7 = constant fractions (1, 7/8, 3/4, ...),
-// 12=k0.rgb, 16=k0.rrr, etc.
-function getKonstColor(kcsel, kasel, konstRegs) {
-  const fracs = [1, 7/8, 3/4, 5/8, 1/2, 3/8, 1/4, 1/8];
-  let kr = 1, kg = 1, kb = 1, ka = 1;
-
-  if (kcsel <= 7) { kr = kg = kb = fracs[kcsel]; }
-  else if (kcsel >= 12 && kcsel <= 15) {
-    const k = konstRegs['k' + (kcsel - 12)] || [255,255,255,255];
-    kr = k[0]/255; kg = k[1]/255; kb = k[2]/255;
-  }
-  else if (kcsel >= 16 && kcsel <= 19) {
-    const k = konstRegs['k' + (kcsel - 16)] || [255,255,255,255];
-    kr = kg = kb = k[0]/255; // .rrr
-  }
-  else if (kcsel >= 20 && kcsel <= 23) {
-    const k = konstRegs['k' + (kcsel - 20)] || [255,255,255,255];
-    kr = kg = kb = k[1]/255; // .ggg
-  }
-  else if (kcsel >= 24 && kcsel <= 27) {
-    const k = konstRegs['k' + (kcsel - 24)] || [255,255,255,255];
-    kr = kg = kb = k[2]/255; // .bbb
-  }
-  else if (kcsel >= 28 && kcsel <= 31) {
-    const k = konstRegs['k' + (kcsel - 28)] || [255,255,255,255];
-    kr = kg = kb = k[3]/255; // .aaa
-  }
-
-  if (kasel <= 7) { ka = fracs[kasel]; }
-  else if (kasel >= 16 && kasel <= 19) {
-    const k = konstRegs['k' + (kasel - 16)] || [255,255,255,255];
-    ka = k[0]/255;
-  }
-  else if (kasel >= 20 && kasel <= 23) {
-    const k = konstRegs['k' + (kasel - 20)] || [255,255,255,255];
-    ka = k[1]/255;
-  }
-  else if (kasel >= 24 && kasel <= 27) {
-    const k = konstRegs['k' + (kasel - 24)] || [255,255,255,255];
-    ka = k[2]/255;
-  }
-  else if (kasel >= 28 && kasel <= 31) {
-    const k = konstRegs['k' + (kasel - 28)] || [255,255,255,255];
-    ka = k[3]/255;
-  }
-
-  return [kr, kg, kb, ka];
-}
-
-// GX blend factor to multiplier
-function blendFactor(factor, src, dst) {
-  switch(factor) {
-    case 0: return [0,0,0,0]; // Zero
-    case 1: return [1,1,1,1]; // One
-    case 2: return [src[0], src[1], src[2], src[3]]; // SrcClr or DstClr
-    case 3: return [1-src[0], 1-src[1], 1-src[2], 1-src[3]]; // InvSrcClr
-    case 4: return [src[3], src[3], src[3], src[3]]; // SrcAlpha
-    case 5: return [1-src[3], 1-src[3], 1-src[3], 1-src[3]]; // InvSrcAlpha
-    case 6: return [dst[3], dst[3], dst[3], dst[3]]; // DstAlpha
-    case 7: return [1-dst[3], 1-dst[3], 1-dst[3], 1-dst[3]]; // InvDstAlpha
-    default: return [1,1,1,1];
-  }
-}
-
-// Compute barycentric coordinates for point (px,py) in triangle (v0, v1, v2)
-// Returns [w0, w1, w2] or null if outside.
-function barycentric(px, py, v0, v1, v2) {
-  const d00 = v1.sx - v0.sx;
-  const d01 = v2.sx - v0.sx;
-  const d10 = v1.sy - v0.sy;
-  const d11 = v2.sy - v0.sy;
-  const det = d00 * d11 - d01 * d10;
-  if (Math.abs(det) < 0.000001) return null; // Degenerate 
-
-  const dx = px - v0.sx;
-  const dy = py - v0.sy;
-  const beta = (dx * d11 - dy * d01) / det;
-  const gamma = (d00 * dy - d10 * dx) / det;
-  const alpha = 1.0 - beta - gamma;
-
-  // A small epsilon allows picking up edge pixels
-  const eps = -0.001; 
-  if (alpha >= eps && beta >= eps && gamma >= eps) {
-    return [Math.max(0, alpha), Math.max(0, beta), Math.max(0, gamma)];
-  }
-  return null;
+  statusLabels.textContent = "Ready";
 }
 
 async function render() {
-  const frames = SCENE.frames || [];
-  if (frames.length === 0) return;
+  const objects = SCENE.frames[0].objects;
+  await loadTextures(objects);
+  document.getElementById('obj-count').textContent = objects.length;
 
-  const allObjects = [];
-  for (const frame of frames) {
-    for (const obj of (frame.objects || [])) {
-      allObjects.push(obj);
-    }
-  }
+  gl.clearColor(0.1, 0.1, 0.12, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
 
-  const texMap = await loadTextures(allObjects);
-  document.getElementById('status').textContent =
-    'Rendering ' + allObjects.length + ' objects...';
+  canvas.onmousemove = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.round(e.clientX - r.left);
+    const y = Math.round(e.clientY - r.top);
+    document.getElementById('coords').textContent = x + ", " + y;
+  };
 
-  // Create framebuffer
-  const fb = ctx.createImageData(W, H);
-  // Initialize to black, alpha=1
-  for (let i = 0; i < fb.data.length; i += 4) {
-    fb.data[i] = 0; fb.data[i+1] = 0; fb.data[i+2] = 0; fb.data[i+3] = 255;
-  }
+  for (const obj of objects) {
+    if (!obj.triangles || obj.triangles.length === 0) continue;
 
-  // Process each object in draw order
-  for (let objIdx = 0; objIdx < allObjects.length; objIdx++) {
-    const obj = allObjects[objIdx];
-    
-    if (objIdx % 10 === 0) {
-      document.getElementById('status').textContent = 
-        'Rendering ' + objIdx + ' / ' + allObjects.length + ' objects...';
-      ctx.putImageData(fb, 0, 0); // Show progressive render
-      await new Promise(r => setTimeout(r, 1)); // Yield to unblock browser
+    // Set Blending
+    if (obj.blendEnable === false) gl.disable(gl.BLEND);
+    else {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
 
-    const triangles = obj.triangles;
-    if (!triangles || triangles.length === 0) continue;
-
-    // Scissor clip (scissor values also include EFB bias)
-    let scX0 = 0, scY0 = 0, scX1 = W, scY1 = H;
-    if (obj.scissor) {
-      scX0 = obj.scissor.x0 - EFB_BIAS;
-      scY0 = obj.scissor.y0 - EFB_BIAS;
-      scX1 = obj.scissor.x1 - EFB_BIAS;
-      scY1 = obj.scissor.y1 - EFB_BIAS;
+    const vertices = [], colors = [], uvs = [[],[],[],[],[],[],[],[]];
+    for (const v of obj.triangles) {
+      vertices.push(v.sx, v.sy);
+      colors.push(v.r, v.g, v.b, v.a);
+      for(let t=0; t<8; t++) uvs[t].push(v.uvs[t][0], v.uvs[t][1]);
     }
 
-    // Get texture info
-    const texInfo = (obj.textures && obj.textures.length > 0) ? obj.textures[0] : null;
-    const texImg = texInfo ? texMap[texInfo.file] : null;
-    const wrapS = texInfo ? texInfo.wrapS : 0;
-    const wrapT = texInfo ? texInfo.wrapT : 0;
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-    // TEV state
-    const colorRegs = obj.tevColorRegs || {};
-    const konstRegs = obj.tevKonstRegs || {};
-    const tevColorOps = obj.tevColorOps || [];
-    const tevAlphaOps = obj.tevAlphaOps || [];
-    const tevKonstSel = obj.tevKonstSel || [];
+    const cbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aColor);
+    gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
 
-    // Blend mode
-    const blendEnable = obj.blendEnable !== undefined ? obj.blendEnable : true;
-    const blendSrc = obj.blendSrc !== undefined ? obj.blendSrc : 4; // SrcAlpha
-    const blendDst = obj.blendDst !== undefined ? obj.blendDst : 5; // InvSrcAlpha
+    for(let t=0; t<8; t++) {
+        const uvbo = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, uvbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs[t]), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(aUv[t]);
+        gl.vertexAttribPointer(aUv[t], 2, gl.FLOAT, false, 0, 0);
+    }
 
-    // Adjust triangles to 0-based screen coords
-    const adjTriangles = triangles.map(v => ({
-      sx: v.sx - EFB_BIAS, sy: v.sy - EFB_BIAS, 
-      uvs: v.uvs, 
-      r: v.r, g: v.g, b: v.b, a: v.a
-    }));
+    // Set Uniforms
+    gl.uniform1i(uNumStages, obj.tevStages || 0);
+    const c0 = obj.tevColorRegs.c0 || [0,0,0,0];
+    const c1 = obj.tevColorRegs.c1 || [0,0,0,0];
+    const c2 = obj.tevColorRegs.c2 || [0,0,0,0];
+    const cData = new Float32Array([
+        c0[0]/255, c0[1]/255, c0[2]/255, c0[3]/255,
+        c1[0]/255, c1[1]/255, c1[2]/255, c1[3]/255,
+        c2[0]/255, c2[1]/255, c2[2]/255, c2[3]/255
+    ]);
+    gl.uniform4fv(uC, cData);
+    gl.uniform4f(uPrevInit, 0, 0, 0, 0);
 
-    // Iterate over each triangle
-    for (let i = 0; i < adjTriangles.length; i += 3) {
-      const v0 = adjTriangles[i], v1 = adjTriangles[i+1], v2 = adjTriangles[i+2];
-
-      // Compute triangle AABB
-      const tMinX = Math.min(v0.sx, v1.sx, v2.sx);
-      const tMinY = Math.min(v0.sy, v1.sy, v2.sy);
-      const tMaxX = Math.max(v0.sx, v1.sx, v2.sx);
-      const tMaxY = Math.max(v0.sy, v1.sy, v2.sy);
-
-      // Effective draw region
-      const rx0 = Math.max(0, Math.floor(Math.max(tMinX, scX0)));
-      const ry0 = Math.max(0, Math.floor(Math.max(tMinY, scY0)));
-      const rx1 = Math.min(W, Math.ceil(Math.min(tMaxX, scX1)));
-      const ry1 = Math.min(H, Math.ceil(Math.min(tMaxY, scY1)));
-      if (rx0 >= rx1 || ry0 >= ry1) continue;
-
-      // Rasterize pixels in the bounding box
-      for (let py = ry0; py < ry1; py++) {
-        for (let px = rx0; px < rx1; px++) {
-          const weights = barycentric(px + 0.5, py + 0.5, v0, v1, v2);
-          if (!weights) continue;
-          
-          const [w0, w1, w2] = weights;
-          const uvs = [];
-          for (let t = 0; t < 8; t++) {
-            const u = w0 * v0.uvs[t][0] + w1 * v1.uvs[t][0] + w2 * v2.uvs[t][0];
-            const vParam = w0 * v0.uvs[t][1] + w1 * v1.uvs[t][1] + w2 * v2.uvs[t][1];
-            uvs.push([u, vParam]);
-          }
-          
-          const rasColor = [
-            w0 * v0.r + w1 * v1.r + w2 * v2.r,
-            w0 * v0.g + w1 * v1.g + w2 * v2.g,
-            w0 * v0.b + w1 * v1.b + w2 * v2.b,
-            w0 * v0.a + w1 * v1.a + w2 * v2.a
-          ];
-
-          // Initialize TEV registers
-          const tevRegs = {
-            prev: [0, 0, 0, 0],
-            c0: (colorRegs.c0 || [0,0,0,0]).map(c => c/255),
-            c1: (colorRegs.c1 || [0,0,0,0]).map(c => c/255),
-            c2: (colorRegs.c2 || [0,0,0,0]).map(c => c/255),
-          };
-
-        // Run TEV stages
-        const tevTref = obj.tevTref || [];
-        const numStages = Math.min(tevColorOps.length, tevAlphaOps.length);
-        for (let s = 0; s < numStages; s++) {
-          const cOp = tevColorOps[s];
-          const aOp = tevAlphaOps[s];
-          const ksel = tevKonstSel[s] || [0, 0];
-          const konst = getKonstColor(ksel[0], ksel[1], konstRegs);
-
-          let texSample = [1, 1, 1, 1];
-          const tref = tevTref[s];
-          if (tref && tref.texEnable) {
-            const texMapIdx = tref.texMap;
-            const texCoordIdx = tref.texCoord < 8 ? tref.texCoord : 0;
-            const tInfo = (obj.textures || []).find(t => t.unit === texMapIdx);
-            if (tInfo) {
-              const tImg = texMap[tInfo.file];
-              const uvCoord = uvs[texCoordIdx];
-              texSample = sampleTex(tImg, uvCoord[0], uvCoord[1], tInfo.wrapS, tInfo.wrapT).map(c => c/255);
-            }
-          }
-
-          // Color combiner
-          const ca = getColorInput(cOp[0], tevRegs, texSample, rasColor, konst);
-          const cb_ = getColorInput(cOp[1], tevRegs, texSample, rasColor, konst);
-          const cc = getColorInput(cOp[2], tevRegs, texSample, rasColor, konst);
-          const cd = getColorInput(cOp[3], tevRegs, texSample, rasColor, konst);
-
-          const outR = tevCombine(ca[0], cb_[0], cc[0], cd[0], 0, 0, 0, true);
-          const outG = tevCombine(ca[1], cb_[1], cc[1], cd[1], 0, 0, 0, true);
-          const outB = tevCombine(ca[2], cb_[2], cc[2], cd[2], 0, 0, 0, true);
-
-          // Alpha combiner
-          const aa = getAlphaInput(aOp[0], tevRegs, texSample, rasColor, konst);
-          const ab = getAlphaInput(aOp[1], tevRegs, texSample, rasColor, konst);
-          const ac = getAlphaInput(aOp[2], tevRegs, texSample, rasColor, konst);
-          const ad = getAlphaInput(aOp[3], tevRegs, texSample, rasColor, konst);
-
-          const outA = tevCombine(aa, ab, ac, ad, 0, 0, 0, true);
-
-          tevRegs.prev = [outR, outG, outB, outA];
+    // Set Konst colors per stage
+    const kData = new Float32Array(16 * 4);
+    const kRegs = obj.tevKonstRegs || {};
+    const kSel = obj.tevKonstSel || [];
+    for(let i=0; i<16; i++) {
+        if(kSel[i]) {
+            // Simplified: mapping kSel to actual konst color fractions or regs
+            const k = kRegs['k0'] || [255,255,255,255]; // fallback
+            kData.set([k[0]/255, k[1]/255, k[2]/255, k[3]/255], i*4);
         }
+    }
+    gl.uniform4fv(uK, kData);
 
-        // Final color from TEV
-        const srcColor = tevRegs.prev;
-
-        // Get destination pixel from framebuffer
-        const fbIdx = (py * W + px) * 4;
-        const dstColor = [
-          fb.data[fbIdx] / 255,
-          fb.data[fbIdx+1] / 255,
-          fb.data[fbIdx+2] / 255,
-          fb.data[fbIdx+3] / 255
-        ];
-
-        // Apply blend mode
-        let finalR, finalG, finalB, finalA;
-        if (blendEnable) {
-          const sf = blendFactor(blendSrc, srcColor, dstColor);
-          const df = blendFactor(blendDst, srcColor, dstColor);
-          finalR = srcColor[0] * sf[0] + dstColor[0] * df[0];
-          finalG = srcColor[1] * sf[1] + dstColor[1] * df[1];
-          finalB = srcColor[2] * sf[2] + dstColor[2] * df[2];
-          finalA = srcColor[3] * sf[3] + dstColor[3] * df[3];
-        } else {
-          finalR = srcColor[0];
-          finalG = srcColor[1];
-          finalB = srcColor[2];
-          finalA = srcColor[3];
-        }
-
-        fb.data[fbIdx]   = Math.max(0, Math.min(255, Math.round(finalR * 255)));
-        fb.data[fbIdx+1] = Math.max(0, Math.min(255, Math.round(finalG * 255)));
-        fb.data[fbIdx+2] = Math.max(0, Math.min(255, Math.round(finalB * 255)));
-        fb.data[fbIdx+3] = 255; // Always opaque on screen
+    // Set Textures 
+    if (obj.textures && obj.textures.length > 0) {
+      // Map up to 8 textures
+      const enabled = new Int32Array(16);
+      const texIndices = new Int32Array(16);
+      const uvIndices = new Int32Array(16);
+      const tref = obj.tevTref || [];
+      
+      for(let i=0; i<8 && i<obj.textures.length; i++) {
+          gl.activeTexture(gl.TEXTURE0 + i);
+          gl.bindTexture(gl.TEXTURE_2D, texMap[obj.textures[i].file]);
+          gl.uniform1i(uTex[i], i);
       }
-    }
-  }
-  }
 
-  ctx.putImageData(fb, 0, 0);
-  document.getElementById('status').textContent =
-    'Done: ' + allObjects.length + ' objects rendered';
+      for(let i=0; i<16; i++) {
+          if (tref[i] && tref[i].texEnable) {
+              enabled[i] = 1;
+              // find which texture index in obj.textures corresponds to tref[i].texMap
+              const tIdx = obj.textures.findIndex(t => t.unit === tref[i].texMap);
+              if (tIdx >= 0) {
+                texIndices[i] = tIdx;
+                uvIndices[i] = tref[i].texCoord;
+              } else { enabled[i] = 0; }
+          }
+      }
+      gl.uniform1iv(uTexEnabled, enabled);
+      gl.uniform1iv(uTexIndices, texIndices);
+      gl.uniform1iv(uUvIndices, uvIndices);
+    }
+
+    // Set TEV Ops
+    const cOps = new Int32Array(16 * 4), aOps = new Int32Array(16 * 4);
+    for(let i=0; i<16; i++) {
+        if (obj.tevColorOps && obj.tevColorOps[i]) {
+            cOps.set(obj.tevColorOps[i], i*4);
+            aOps.set(obj.tevAlphaOps[i], i*4);
+        }
+    }
+    gl.uniform4iv(uColorOps, cOps);
+    gl.uniform4iv(uAlphaOps, aOps);
+
+    gl.drawArrays(gl.TRIANGLES, 0, obj.triangles.length);
+  }
+  document.getElementById('status').textContent = 'Done';
 }
 
 render();
