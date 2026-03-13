@@ -283,6 +283,12 @@ public:
   RcTcacheEntry GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
                               MathUtil::Rectangle<int>* display_rect);
 
+  // Look up texture name by GX address for FIFO Analyzer export
+  std::string GetTextureNameByAddress(u32 address) const;
+
+  // Look up texture cache entry by GX address (for saving textures)
+  RcTcacheEntry GetEntryByAddress(u32 address) const;
+
   virtual void BindTextures(BitSet32 used_textures, const std::array<SamplerState, 8>& samplers);
   void CopyRenderTargetToTexture(u32 dstAddr, EFBCopyFormat dstFormat, u32 width, u32 height,
                                  u32 dstStride, bool is_depth_copy,

@@ -37,6 +37,8 @@ private:
   void BeginSearch();
   void FindNext();
   void FindPrevious();
+  void ExportAll();
+  void ExportScene();
 
   void ShowSearchResult(size_t index);
 
@@ -59,6 +61,8 @@ private:
   QPushButton* m_search_new;
   QPushButton* m_search_next;
   QPushButton* m_search_previous;
+  QPushButton* m_export_all;
+  QPushButton* m_export_scene;
   QLabel* m_search_label;
   QSplitter* m_search_splitter;
 

@@ -1608,6 +1608,39 @@ RcTcacheEntry TextureCacheBase::GetTexture(const int textureCacheSafetyColorSamp
   return entry;
 }
 
+std::string TextureCacheBase::GetTextureNameByAddress(u32 address) const
+{
+  auto iter_range = m_textures_by_address.equal_range(address);
+  for (auto it = iter_range.first; it != iter_range.second; ++it)
+  {
+    const auto& entry = it->second;
+    if (!entry)
+      continue;
+
+    // Return the hash-based name if available (computed when GraphicMods is enabled)
+    if (!entry->texture_info_name.empty())
+      return entry->texture_info_name;
+
+    // Fallback: construct a name from entry metadata (safe, no data access)
+    return fmt::format("tex1_{}x{}_{}_0x{:08X}",
+                       entry->native_width, entry->native_height,
+                       static_cast<int>(entry->format.texfmt), address);
+  }
+  return "";
+}
+
+RcTcacheEntry TextureCacheBase::GetEntryByAddress(u32 address) const
+{
+  auto iter_range = m_textures_by_address.equal_range(address);
+  for (auto it = iter_range.first; it != iter_range.second; ++it)
+  {
+    const auto& entry = it->second;
+    if (entry && entry->texture)
+      return entry;
+  }
+  return {};
+}
+
 // Note: the following function assumes all CustomTextureData has a single slice.  This is verified
 // with the 'GameTexture::Validate' function after the data is loaded. Only a single slice is
 // expected because each texture is loaded into a texture array
