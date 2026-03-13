@@ -2085,12 +2085,8 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
   json << "{\n";
   json << "  \"exportVersion\": 1,\n";
 
+  // HTML will be written after JSON is complete (we embed the JSON data inline)
   std::ostringstream html;
-  html << "<!DOCTYPE html>\n<html>\n<head>\n<style>\n";
-  html << "  body { background: #333; overflow: hidden; margin: 0; padding: 0; font-family: sans-serif; }\n";
-  html << "  #scene-container { position: relative; width: 608px; height: 456px; margin: 20px auto; background: black; overflow: hidden; box-shadow: 0 0 20px rgba(0,0,0,0.5); }\n";
-  html << "  .quad { position: absolute; transform-origin: top left; image-rendering: pixelated; }\n";
-  html << "</style>\n</head>\n<body>\n<div id=\"scene-container\">\n";
   json << "  \"frameCount\": " << frame_count << ",\n";
   json << "  \"frames\": [\n";
 
@@ -2247,23 +2243,16 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
         tex_export_count++;
       }
 
-      // Compute FINAL SCREEN-SPACE bounding box using full GX pipeline:
+      // Compute screen-space quad vertices using full GX pipeline:
       // 1. Model-view: mv = posMatrix * vertex
       // 2. Projection (ortho): clip_x = mv_x * proj[0] + proj[1]
       //                        clip_y = mv_y * proj[2] + proj[3]
       // 3. Viewport: screen_x = clip_x * vp_wd + vp_xOrig
       //              screen_y = clip_y * vp_ht + vp_yOrig
-      float min_x = 1e9f, min_y = 1e9f, max_x = -1e9f, max_y = -1e9f;
-      bool has_bounds = false;
-
-      // Also track which vertex maps to screen TL and BR for UV export.
-      float tl_dist = 1e18f, br_dist = 1e18f;
-      float uv_tl_u = 0, uv_tl_v = 0, uv_br_u = 1, uv_br_v = 1;
-      bool has_uvs = false;
 
       // Collect screen-space quad vertices (up to 4) with their UVs.
       // These are the actual corners of the rendered quad after the full
-      // GX pipeline, ready for AddImageQuad on the C# side.
+      // GX pipeline.
       struct ScreenVert { float sx, sy, u, v; };
       std::vector<ScreenVert> quad_verts;
 
@@ -2292,34 +2281,17 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
         return {sx, sy};
       };
 
-      // Single pass: bounding box, UV corner matching, and quad collection
+      // Transform vertices to screen-space and collect quad corners
       for (const auto& v : summary_cb.m_vertices)
       {
         if (!v.has_pos) continue;
         auto [sx, sy] = transform_vert(v.px, v.py, v.pz, v.pos_idx);
-
-        // Bounding box update
-        min_x = std::min(min_x, sx);
-        min_y = std::min(min_y, sy);
-        max_x = std::max(max_x, sx);
-        max_y = std::max(max_y, sy);
-        has_bounds = true;
 
         // Collect quad vertices (first 4 with UVs)
         if (v.has_uv_set[0] && quad_verts.size() < 4)
         {
           quad_verts.push_back({sx, sy, v.uvs[0][0], v.uvs[0][1]});
         }
-      }
-
-      // Now find UV corners by distance to screen-space TL/BR
-      for (const auto& qv : quad_verts)
-      {
-        float d_tl = (qv.sx - min_x) * (qv.sx - min_x) + (qv.sy - min_y) * (qv.sy - min_y);
-        float d_br = (qv.sx - max_x) * (qv.sx - max_x) + (qv.sy - max_y) * (qv.sy - max_y);
-        if (d_tl < tl_dist) { tl_dist = d_tl; uv_tl_u = qv.u; uv_tl_v = qv.v; }
-        if (d_br < br_dist) { br_dist = d_br; uv_br_u = qv.u; uv_br_v = qv.v; }
-        has_uvs = true;
       }
 
       // Decode TEV registers for this object
@@ -2337,25 +2309,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       json << "        {\n";
       json << "          \"objectIndex\": " << object_idx << ",\n";
 
-      // Screen-space bounds (final pixel coordinates)
-      if (has_bounds)
-      {
-        json << fmt::format("          \"screenX\": {:.1f},\n", min_x);
-        json << fmt::format("          \"screenY\": {:.1f},\n", min_y);
-        json << fmt::format("          \"screenW\": {:.1f},\n", max_x - min_x);
-        json << fmt::format("          \"screenH\": {:.1f},\n", max_y - min_y);
-      }
-
-      // Authoritative UV corners — computed by finding which vertex maps to
-      // screen TL and BR after the full GX pipeline (model-view + projection + viewport).
-      // This eliminates UV guesswork on the compositor side.
-      if (has_uvs)
-      {
-        json << fmt::format("          \"uvTL_U\": {:.6f},\n", uv_tl_u);
-        json << fmt::format("          \"uvTL_V\": {:.6f},\n", uv_tl_v);
-        json << fmt::format("          \"uvBR_U\": {:.6f},\n", uv_br_u);
-        json << fmt::format("          \"uvBR_V\": {:.6f},\n", uv_br_v);
-      }
+      // (screenX/Y/W/H and uvTL/BR removed — raw data is in quad[] and vertices[])
 
       // Screen-space quad vertices — 4 corners with final pixel positions + UVs.
       // The C# compositor can use AddImageQuad with these for accurate rendering
@@ -2374,15 +2328,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
         json << "          ],\n";
       }
 
-      // Position matrix
-      if (summary_cb.m_has_pos_matrix)
-      {
-        json << fmt::format("          \"translateX\": {:.2f},\n", summary_cb.m_pos_matrices[3]);
-        json << fmt::format("          \"translateY\": {:.2f},\n", summary_cb.m_pos_matrices[7]);
-        json << fmt::format("          \"translateZ\": {:.2f},\n", summary_cb.m_pos_matrices[11]);
-        json << fmt::format("          \"scaleX\": {:.4f},\n", summary_cb.m_pos_matrices[0]);
-        json << fmt::format("          \"scaleY\": {:.4f},\n", summary_cb.m_pos_matrices[5]);
-      }
+      // (translateX/Y/Z, scaleX/Y removed — full matrix is in posMatrix via quad[])
 
       // Textures
       json << "          \"textures\": [";
@@ -2408,26 +2354,35 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       }
       json << "],\n";
 
-      // TEV registers (decoded RGBA)
-      json << "          \"tevRegisters\": {";
-      bool first_reg = true;
-      for (int i = 0; i < 4; i++)
+      // TEV color registers (c0-c3, the "color" bank)
+      json << "          \"tevColorRegs\": {";
       {
-        bool has_color = summary_cb.m_tev_color_set[i];
-        bool has_konst = summary_cb.m_tev_konst_set[i];
-        if (!has_color && !has_konst) continue;
-
-        if (!first_reg) json << ", ";
-        first_reg = false;
-
-        int r, g, b, a;
-        // Prefer color bank (NW4R material colors) over konst bank
-        if (has_color)
+        bool first_reg = true;
+        for (int i = 0; i < 4; i++)
+        {
+          if (!summary_cb.m_tev_color_set[i]) continue;
+          if (!first_reg) json << ", ";
+          first_reg = false;
+          int r, g, b, a;
           decode_reg(summary_cb.m_tev_color_ra[i], summary_cb.m_tev_color_bg[i], r, g, b, a);
-        else
-          decode_reg(summary_cb.m_tev_konst_ra[i], summary_cb.m_tev_konst_bg[i], r, g, b, a);
+          json << fmt::format("\"c{}\": [{}, {}, {}, {}]", i, r, g, b, a);
+        }
+      }
+      json << "},\n";
 
-        json << fmt::format("\"c{}\": [{}, {}, {}, {}]", i, r, g, b, a);
+      // TEV konst registers (k0-k3, the "konst" bank)
+      json << "          \"tevKonstRegs\": {";
+      {
+        bool first_reg = true;
+        for (int i = 0; i < 4; i++)
+        {
+          if (!summary_cb.m_tev_konst_set[i]) continue;
+          if (!first_reg) json << ", ";
+          first_reg = false;
+          int r, g, b, a;
+          decode_reg(summary_cb.m_tev_konst_ra[i], summary_cb.m_tev_konst_bg[i], r, g, b, a);
+          json << fmt::format("\"k{}\": [{}, {}, {}, {}]", i, r, g, b, a);
+        }
       }
       json << "},\n";
 
@@ -2602,112 +2557,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       json << "          \"drawOrder\": " << object_idx << "\n";
       json << "        }";
 
-      if (has_bounds)
-      {
-        float w = max_x - min_x;
-        float h = max_y - min_y;
-        if (w > 0 && h > 0 && w < 10000 && h < 10000)
-        {
-          std::string html_style = fmt::format(
-              "left: {:.2f}px; top: {:.2f}px; width: {:.2f}px; height: {:.2f}px; z-index: {}; ",
-              min_x, min_y, w, h, object_idx);
-          
-          bool has_tex = false;
-          for (int i = 0; i < 8; i++)
-          {
-            if (summary_cb.m_tex_set[i])
-            {
-              auto it = tex_addr_to_filename.find(summary_cb.m_tex_addr[i]);
-              std::string fname = (it != tex_addr_to_filename.end()) ? it->second :
-                  fmt::format("tex_0x{:08X}_{}x{}.png", summary_cb.m_tex_addr[i],
-                              summary_cb.m_tex_width[i], summary_cb.m_tex_height[i]);
-              html_style += fmt::format("background-image: url('textures/{}'); ", fname);
-              if (has_uvs)
-              {
-                float uv_w = uv_br_u - uv_tl_u;
-                float uv_h = uv_br_v - uv_tl_v;
-                if (uv_w != 0 && uv_h != 0)
-                {
-                  float bg_w = w / uv_w;
-                  float bg_h = h / uv_h;
-                  float bg_x = -uv_tl_u * bg_w;
-                  float bg_y = -uv_tl_v * bg_h;
-                  html_style += fmt::format("background-size: {:.2f}px {:.2f}px; ", bg_w, bg_h);
-                  html_style += fmt::format("background-position: {:.2f}px {:.2f}px; ", bg_x, bg_y);
-                  
-                  int wrapS = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_s[i] : 0;
-                  int wrapT = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_t[i] : 0;
-                  std::string repeat = "no-repeat";
-                  if (wrapS == 1 && wrapT == 1) repeat = "repeat";
-                  else if (wrapS == 1) repeat = "repeat-x";
-                  else if (wrapT == 1) repeat = "repeat-y";
-                  html_style += fmt::format("background-repeat: {}; ", repeat);
-                }
-              }
-              has_tex = true;
-              break;
-            }
-          }
-          
-          int div_r = 255, div_g = 255, div_b = 255, div_a = 255;
-          bool color_found = false;
-          auto decode_reg_html = [](u32 ra, u32 bg, int& r, int& g, int& b, int& a) {
-            r = std::clamp(int(ra & 0x7FF), 0, 255);
-            a = std::clamp(int((ra >> 12) & 0x7FF), 0, 255);
-            b = std::clamp(int(bg & 0x7FF), 0, 255);
-            g = std::clamp(int((bg >> 12) & 0x7FF), 0, 255);
-          };
-          for (int i : {1, 0, 2}) {
-            if (summary_cb.m_tev_color_set[i] || summary_cb.m_tev_konst_set[i]) {
-                int tr, tg, tb, ta;
-                if (summary_cb.m_tev_color_set[i])
-                    decode_reg_html(summary_cb.m_tev_color_ra[i], summary_cb.m_tev_color_bg[i], tr, tg, tb, ta);
-                else
-                    decode_reg_html(summary_cb.m_tev_konst_ra[i], summary_cb.m_tev_konst_bg[i], tr, tg, tb, ta);
-                div_r = tr; div_g = tg; div_b = tb; div_a = ta;
-                color_found = true;
-                break;
-            }
-          }
-
-          if (color_found)
-          {
-            html_style += fmt::format("background-color: rgba({},{},{},{:.2f}); ", div_r, div_g, div_b, div_a / 255.0f);
-            if (has_tex) html_style += "background-blend-mode: multiply; ";
-          }
-          else if (!summary_cb.m_vertices.empty() && summary_cb.m_vertices[0].has_color)
-          {
-            auto& v = summary_cb.m_vertices[0];
-            html_style += fmt::format("background-color: rgba({},{},{},{:.2f}); ", v.cr, v.cg, v.cb, v.ca / 255.0f);
-            if (has_tex) html_style += "background-blend-mode: multiply; ";
-          }
-          else if (!has_tex)
-          {
-            html_style += "background-color: rgba(255,255,255,1.0); ";
-          }
-
-          // Apply scissor clip if set
-          if (summary_cb.m_scissor_set)
-          {
-             ScissorPos stl; stl.hex = summary_cb.m_scissor_tl;
-             ScissorPos sbr; sbr.hex = summary_cb.m_scissor_br;
-             float sx0 = static_cast<float>(stl.x.Value());
-             float sy0 = static_cast<float>(stl.y.Value());
-             float sx1 = static_cast<float>(sbr.x.Value()) + 1.0f;
-             float sy1 = static_cast<float>(sbr.y.Value()) + 1.0f;
-             float rx0 = sx0 - min_x;
-             float ry0 = sy0 - min_y;
-             float rx1 = sx1 - min_x;
-             float ry1 = sy1 - min_y;
-             if (rx0 > 0 || ry0 > 0 || rx1 < w || ry1 < h) {
-                  html_style += fmt::format("clip-path: polygon({:.1f}px {:.1f}px, {:.1f}px {:.1f}px, {:.1f}px {:.1f}px, {:.1f}px {:.1f}px); ",
-                      rx0, ry0, rx1, ry0, rx1, ry1, rx0, ry1);
-             }
-          }
-
-          html << "    <div class=\"quad\" style=\"" << html_style << "\"></div>\n";
-        }
-      }
+      // (HTML generation moved to post-JSON canvas renderer)
 
       object_idx++;
       total_objects++;
@@ -2729,7 +2579,437 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
     json_file.close();
   }
 
-  html << "</div>\n</body>\n</html>\n";
+  // Build canvas-based HTML with embedded JSON and JS TEV simulator
+  const std::string json_data = json.str();
+  html << "<!DOCTYPE html>\n<html>\n<head>\n<style>\n";
+  html << "  body { background: #222; margin: 0; padding: 20px; font-family: monospace; }\n";
+  html << "  canvas { display: block; margin: 0 auto; image-rendering: pixelated; ";
+  html << "box-shadow: 0 0 20px rgba(0,0,0,0.5); }\n";
+  html << "  #status { color: #aaa; text-align: center; margin-top: 10px; font-size: 12px; }\n";
+  html << "</style>\n</head>\n<body>\n";
+  html << "<canvas id=\"scene\" width=\"608\" height=\"456\"></canvas>\n";
+  html << "<div id=\"status\">Loading textures...</div>\n";
+  html << "<script>\n";
+  html << "const SCENE = " << json_data << ";\n";
+  html << R"JS(
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+const W = 608, H = 456;
+
+// GX EFB bias: hardware adds 342 to scissor/viewport coords
+const EFB_BIAS = 342;
+
+// Load all textures, then render
+async function loadTextures(objects) {
+  const texMap = {};
+  const promises = [];
+  for (const obj of objects) {
+    for (const tex of (obj.textures || [])) {
+      if (texMap[tex.file]) continue;
+      texMap[tex.file] = null;
+      const p = new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => { texMap[tex.file] = img; resolve(); };
+        img.onerror = () => resolve();
+        img.src = 'textures/' + tex.file;
+      });
+      promises.push(p);
+    }
+  }
+  await Promise.all(promises);
+  return texMap;
+}
+
+// Sample texture at UV coordinates, returns [r,g,b,a] 0-255
+function sampleTex(texImg, u, v, wrapS, wrapT) {
+  if (!texImg) return [255, 255, 255, 255];
+
+  // Apply wrap mode: 0=Clamp, 1=Repeat, 2=Mirror
+  function applyWrap(coord, mode) {
+    if (mode === 1) { coord = coord % 1; if (coord < 0) coord += 1; }
+    else if (mode === 2) {
+      coord = Math.abs(coord);
+      const i = Math.floor(coord);
+      coord = (i & 1) ? 1 - (coord - i) : (coord - i);
+    }
+    else { coord = Math.max(0, Math.min(1, coord)); }
+    return coord;
+  }
+
+  u = applyWrap(u, wrapS);
+  v = applyWrap(v, wrapT);
+
+  // Draw to offscreen canvas to get pixel data
+  if (!texImg._canvas) {
+    const c = document.createElement('canvas');
+    c.width = texImg.naturalWidth;
+    c.height = texImg.naturalHeight;
+    const tc = c.getContext('2d');
+    tc.drawImage(texImg, 0, 0);
+    texImg._data = tc.getImageData(0, 0, c.width, c.height);
+    texImg._canvas = c;
+  }
+
+  const data = texImg._data;
+  const px = Math.min(Math.floor(u * data.width), data.width - 1);
+  const py = Math.min(Math.floor(v * data.height), data.height - 1);
+  const idx = (py * data.width + px) * 4;
+  return [data.data[idx], data.data[idx+1], data.data[idx+2], data.data[idx+3]];
+}
+
+// TEV combiner: result = d + ((1-c)*a + c*b) + bias, then scale
+// For alpha: same formula but single channel
+function tevCombine(a, b, c, d, bias, op, scale, clamp) {
+  // result = d + (a*(1-c) + b*c) with bias and scale
+  let result = d + (a * (1 - c) + b * c);
+  if (bias === 1) result += 0.5;      // +0.5
+  else if (bias === 2) result -= 0.5; // -0.5
+  // bias === 3 is compare mode, handled separately
+
+  if (op === 1) result = d - (a * (1 - c) + b * c); // subtract
+
+  if (scale === 1) result *= 2;
+  else if (scale === 2) result *= 4;
+  else if (scale === 3) result *= 0.5;
+
+  if (clamp) result = Math.max(0, Math.min(1, result));
+  return result;
+}
+
+// Resolve a TEV color input index to [r,g,b] normalized 0-1
+// Color inputs: 0=prev, 1=prev.a, 2=c0, 3=c0.a, 4=c1, 5=c1.a,
+//   6=c2, 7=c2.a, 8=tex, 9=tex.a, 10=ras, 11=ras.a,
+//   12=ONE, 13=HALF, 14=konst, 15=ZERO
+function getColorInput(idx, regs, tex, ras, konst) {
+  const r = regs; // {prev, c0, c1, c2} each [r,g,b,a]
+  switch(idx) {
+    case 0: return [r.prev[0], r.prev[1], r.prev[2]];
+    case 1: return [r.prev[3], r.prev[3], r.prev[3]];
+    case 2: return [r.c0[0], r.c0[1], r.c0[2]];
+    case 3: return [r.c0[3], r.c0[3], r.c0[3]];
+    case 4: return [r.c1[0], r.c1[1], r.c1[2]];
+    case 5: return [r.c1[3], r.c1[3], r.c1[3]];
+    case 6: return [r.c2[0], r.c2[1], r.c2[2]];
+    case 7: return [r.c2[3], r.c2[3], r.c2[3]];
+    case 8: return [tex[0], tex[1], tex[2]];
+    case 9: return [tex[3], tex[3], tex[3]];
+    case 10: return [ras[0], ras[1], ras[2]];
+    case 11: return [ras[3], ras[3], ras[3]];
+    case 12: return [1, 1, 1]; // ONE (8/8)
+    case 13: return [0.5, 0.5, 0.5]; // HALF (4/8)
+    case 14: return [konst[0], konst[1], konst[2]];
+    case 15: return [0, 0, 0]; // ZERO
+    default: return [0, 0, 0];
+  }
+}
+
+// Resolve a TEV alpha input index to scalar 0-1
+// Alpha inputs: 0=prev, 1=c0, 2=c1, 3=c2, 4=tex, 5=ras, 6=konst, 7=zero
+function getAlphaInput(idx, regs, tex, ras, konst) {
+  switch(idx) {
+    case 0: return regs.prev[3];
+    case 1: return regs.c0[3];
+    case 2: return regs.c1[3];
+    case 3: return regs.c2[3];
+    case 4: return tex[3];
+    case 5: return ras[3];
+    case 6: return konst[3];
+    case 7: return 0;
+    default: return 0;
+  }
+}
+
+// Resolve konst color selection (kcsel) to [r,g,b,a] 0-1
+// KonstSel values: 0-7 = constant fractions (1, 7/8, 3/4, ...),
+// 12=k0.rgb, 16=k0.rrr, etc.
+function getKonstColor(kcsel, kasel, konstRegs) {
+  const fracs = [1, 7/8, 3/4, 5/8, 1/2, 3/8, 1/4, 1/8];
+  let kr = 1, kg = 1, kb = 1, ka = 1;
+
+  if (kcsel <= 7) { kr = kg = kb = fracs[kcsel]; }
+  else if (kcsel >= 12 && kcsel <= 15) {
+    const k = konstRegs['k' + (kcsel - 12)] || [255,255,255,255];
+    kr = k[0]/255; kg = k[1]/255; kb = k[2]/255;
+  }
+  else if (kcsel >= 16 && kcsel <= 19) {
+    const k = konstRegs['k' + (kcsel - 16)] || [255,255,255,255];
+    kr = kg = kb = k[0]/255; // .rrr
+  }
+  else if (kcsel >= 20 && kcsel <= 23) {
+    const k = konstRegs['k' + (kcsel - 20)] || [255,255,255,255];
+    kr = kg = kb = k[1]/255; // .ggg
+  }
+  else if (kcsel >= 24 && kcsel <= 27) {
+    const k = konstRegs['k' + (kcsel - 24)] || [255,255,255,255];
+    kr = kg = kb = k[2]/255; // .bbb
+  }
+  else if (kcsel >= 28 && kcsel <= 31) {
+    const k = konstRegs['k' + (kcsel - 28)] || [255,255,255,255];
+    kr = kg = kb = k[3]/255; // .aaa
+  }
+
+  if (kasel <= 7) { ka = fracs[kasel]; }
+  else if (kasel >= 16 && kasel <= 19) {
+    const k = konstRegs['k' + (kasel - 16)] || [255,255,255,255];
+    ka = k[0]/255;
+  }
+  else if (kasel >= 20 && kasel <= 23) {
+    const k = konstRegs['k' + (kasel - 20)] || [255,255,255,255];
+    ka = k[1]/255;
+  }
+  else if (kasel >= 24 && kasel <= 27) {
+    const k = konstRegs['k' + (kasel - 24)] || [255,255,255,255];
+    ka = k[2]/255;
+  }
+  else if (kasel >= 28 && kasel <= 31) {
+    const k = konstRegs['k' + (kasel - 28)] || [255,255,255,255];
+    ka = k[3]/255;
+  }
+
+  return [kr, kg, kb, ka];
+}
+
+// GX blend factor to multiplier
+function blendFactor(factor, src, dst) {
+  switch(factor) {
+    case 0: return [0,0,0,0]; // Zero
+    case 1: return [1,1,1,1]; // One
+    case 2: return [src[0], src[1], src[2], src[3]]; // SrcClr or DstClr
+    case 3: return [1-src[0], 1-src[1], 1-src[2], 1-src[3]]; // InvSrcClr
+    case 4: return [src[3], src[3], src[3], src[3]]; // SrcAlpha
+    case 5: return [1-src[3], 1-src[3], 1-src[3], 1-src[3]]; // InvSrcAlpha
+    case 6: return [dst[3], dst[3], dst[3], dst[3]]; // DstAlpha
+    case 7: return [1-dst[3], 1-dst[3], 1-dst[3], 1-dst[3]]; // InvDstAlpha
+    default: return [1,1,1,1];
+  }
+}
+
+// Check if point is inside quad (4 screen-space vertices)
+function pointInQuad(px, py, quad) {
+  // Use cross product winding test for convex quad
+  let inside = true;
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    const ex = quad[j].sx - quad[i].sx;
+    const ey = quad[j].sy - quad[i].sy;
+    const dx = px - quad[i].sx;
+    const dy = py - quad[i].sy;
+    if (ex * dy - ey * dx < -0.001) { inside = false; break; }
+  }
+  if (inside) return true;
+  // Try reverse winding
+  inside = true;
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    const ex = quad[j].sx - quad[i].sx;
+    const ey = quad[j].sy - quad[i].sy;
+    const dx = px - quad[i].sx;
+    const dy = py - quad[i].sy;
+    if (ex * dy - ey * dx > 0.001) { inside = false; break; }
+  }
+  return inside;
+}
+
+// Bilinear interpolation to get UV at screen point within quad
+function interpolateUV(px, py, quad) {
+  // Use inverse bilinear for quad: find (s,t) such that
+  // P = (1-s)(1-t)*V0 + s(1-t)*V1 + s*t*V2 + (1-s)*t*V3
+  // Simplified: project onto axes defined by quad edges
+  const v0 = quad[0], v1 = quad[1], v2 = quad[2], v3 = quad[3];
+
+  // For axis-aligned quads (common case), use simple linear interpolation
+  const minX = Math.min(v0.sx, v1.sx, v2.sx, v3.sx);
+  const maxX = Math.max(v0.sx, v1.sx, v2.sx, v3.sx);
+  const minY = Math.min(v0.sy, v1.sy, v2.sy, v3.sy);
+  const maxY = Math.max(v0.sy, v1.sy, v2.sy, v3.sy);
+
+  const s = maxX > minX ? (px - minX) / (maxX - minX) : 0;
+  const t = maxY > minY ? (py - minY) / (maxY - minY) : 0;
+
+  // Find which vertices are TL, TR, BR, BL by position
+  const sorted = [...quad].sort((a, b) => a.sy - b.sy || a.sx - b.sx);
+  const top = sorted.slice(0, 2).sort((a, b) => a.sx - b.sx);
+  const bot = sorted.slice(2, 4).sort((a, b) => a.sx - b.sx);
+  const tl = top[0], tr = top[1], bl = bot[0], br = bot[1];
+
+  const u = (1-t) * ((1-s)*tl.u + s*tr.u) + t * ((1-s)*bl.u + s*br.u);
+  const v = (1-t) * ((1-s)*tl.v + s*tr.v) + t * ((1-s)*bl.v + s*br.v);
+  return [u, v];
+}
+
+async function render() {
+  const frames = SCENE.frames || [];
+  if (frames.length === 0) return;
+
+  const allObjects = [];
+  for (const frame of frames) {
+    for (const obj of (frame.objects || [])) {
+      allObjects.push(obj);
+    }
+  }
+
+  const texMap = await loadTextures(allObjects);
+  document.getElementById('status').textContent =
+    'Rendering ' + allObjects.length + ' objects...';
+
+  // Create framebuffer
+  const fb = ctx.createImageData(W, H);
+  // Initialize to black, alpha=1
+  for (let i = 0; i < fb.data.length; i += 4) {
+    fb.data[i] = 0; fb.data[i+1] = 0; fb.data[i+2] = 0; fb.data[i+3] = 255;
+  }
+
+  // Process each object in draw order
+  for (const obj of allObjects) {
+    const quad = obj.quad;
+    if (!quad || quad.length !== 4) continue;
+
+    // Compute screen AABB (subtract EFB bias to get 0-based coords)
+    let qMinX = Infinity, qMinY = Infinity, qMaxX = -Infinity, qMaxY = -Infinity;
+    for (const v of quad) {
+      const sx = v.sx - EFB_BIAS, sy = v.sy - EFB_BIAS;
+      qMinX = Math.min(qMinX, sx); qMinY = Math.min(qMinY, sy);
+      qMaxX = Math.max(qMaxX, sx); qMaxY = Math.max(qMaxY, sy);
+    }
+
+    // Scissor clip (scissor values also include EFB bias)
+    let scX0 = 0, scY0 = 0, scX1 = W, scY1 = H;
+    if (obj.scissor) {
+      scX0 = obj.scissor.x0 - EFB_BIAS;
+      scY0 = obj.scissor.y0 - EFB_BIAS;
+      scX1 = obj.scissor.x1 - EFB_BIAS;
+      scY1 = obj.scissor.y1 - EFB_BIAS;
+    }
+
+    // Effective draw region
+    const rx0 = Math.max(0, Math.floor(Math.max(qMinX, scX0)));
+    const ry0 = Math.max(0, Math.floor(Math.max(qMinY, scY0)));
+    const rx1 = Math.min(W, Math.ceil(Math.min(qMaxX, scX1)));
+    const ry1 = Math.min(H, Math.ceil(Math.min(qMaxY, scY1)));
+    if (rx0 >= rx1 || ry0 >= ry1) continue;
+
+    // Get texture info
+    const texInfo = (obj.textures && obj.textures.length > 0) ? obj.textures[0] : null;
+    const texImg = texInfo ? texMap[texInfo.file] : null;
+    const wrapS = texInfo ? texInfo.wrapS : 0;
+    const wrapT = texInfo ? texInfo.wrapT : 0;
+
+    // TEV state
+    const colorRegs = obj.tevColorRegs || {};
+    const konstRegs = obj.tevKonstRegs || {};
+    const tevColorOps = obj.tevColorOps || [];
+    const tevAlphaOps = obj.tevAlphaOps || [];
+    const tevKonstSel = obj.tevKonstSel || [];
+
+    // Vertex color (raster color) - use first vertex
+    const v0 = (obj.vertices && obj.vertices.length > 0) ? obj.vertices[0] : null;
+    const rasColor = v0 && v0.r !== undefined ?
+      [v0.r/255, v0.g/255, v0.b/255, v0.a/255] : [1, 1, 1, 1];
+
+    // Blend mode
+    const blendEnable = obj.blendEnable !== undefined ? obj.blendEnable : true;
+    const blendSrc = obj.blendSrc !== undefined ? obj.blendSrc : 4; // SrcAlpha
+    const blendDst = obj.blendDst !== undefined ? obj.blendDst : 5; // InvSrcAlpha
+
+    // Adjust quad to 0-based screen coords
+    const adjQuad = quad.map(v => ({sx: v.sx - EFB_BIAS, sy: v.sy - EFB_BIAS, u: v.u, v: v.v}));
+
+    // Rasterize pixels in the bounding box
+    for (let py = ry0; py < ry1; py++) {
+      for (let px = rx0; px < rx1; px++) {
+        // Point-in-quad test
+        if (!pointInQuad(px + 0.5, py + 0.5, adjQuad)) continue;
+
+        // Interpolate UV
+        const [u, v] = interpolateUV(px + 0.5, py + 0.5, adjQuad);
+
+        // Sample texture
+        const texSample = texInfo ?
+          sampleTex(texImg, u, v, wrapS, wrapT).map(c => c/255) :
+          [1, 1, 1, 1];
+
+        // Initialize TEV registers
+        const tevRegs = {
+          prev: [0, 0, 0, 0],
+          c0: (colorRegs.c0 || [0,0,0,0]).map(c => c/255),
+          c1: (colorRegs.c1 || [0,0,0,0]).map(c => c/255),
+          c2: (colorRegs.c2 || [0,0,0,0]).map(c => c/255),
+        };
+
+        // Run TEV stages
+        const numStages = Math.min(tevColorOps.length, tevAlphaOps.length);
+        for (let s = 0; s < numStages; s++) {
+          const cOp = tevColorOps[s];
+          const aOp = tevAlphaOps[s];
+          const ksel = tevKonstSel[s] || [0, 0];
+          const konst = getKonstColor(ksel[0], ksel[1], konstRegs);
+
+          // Color combiner
+          const ca = getColorInput(cOp[0], tevRegs, texSample, rasColor, konst);
+          const cb_ = getColorInput(cOp[1], tevRegs, texSample, rasColor, konst);
+          const cc = getColorInput(cOp[2], tevRegs, texSample, rasColor, konst);
+          const cd = getColorInput(cOp[3], tevRegs, texSample, rasColor, konst);
+
+          const outR = tevCombine(ca[0], cb_[0], cc[0], cd[0], 0, 0, 0, true);
+          const outG = tevCombine(ca[1], cb_[1], cc[1], cd[1], 0, 0, 0, true);
+          const outB = tevCombine(ca[2], cb_[2], cc[2], cd[2], 0, 0, 0, true);
+
+          // Alpha combiner
+          const aa = getAlphaInput(aOp[0], tevRegs, texSample, rasColor, konst);
+          const ab = getAlphaInput(aOp[1], tevRegs, texSample, rasColor, konst);
+          const ac = getAlphaInput(aOp[2], tevRegs, texSample, rasColor, konst);
+          const ad = getAlphaInput(aOp[3], tevRegs, texSample, rasColor, konst);
+
+          const outA = tevCombine(aa, ab, ac, ad, 0, 0, 0, true);
+
+          tevRegs.prev = [outR, outG, outB, outA];
+        }
+
+        // Final color from TEV
+        const srcColor = tevRegs.prev;
+
+        // Get destination pixel from framebuffer
+        const fbIdx = (py * W + px) * 4;
+        const dstColor = [
+          fb.data[fbIdx] / 255,
+          fb.data[fbIdx+1] / 255,
+          fb.data[fbIdx+2] / 255,
+          fb.data[fbIdx+3] / 255
+        ];
+
+        // Apply blend mode
+        let finalR, finalG, finalB, finalA;
+        if (blendEnable) {
+          const sf = blendFactor(blendSrc, srcColor, dstColor);
+          const df = blendFactor(blendDst, srcColor, dstColor);
+          finalR = srcColor[0] * sf[0] + dstColor[0] * df[0];
+          finalG = srcColor[1] * sf[1] + dstColor[1] * df[1];
+          finalB = srcColor[2] * sf[2] + dstColor[2] * df[2];
+          finalA = srcColor[3] * sf[3] + dstColor[3] * df[3];
+        } else {
+          finalR = srcColor[0];
+          finalG = srcColor[1];
+          finalB = srcColor[2];
+          finalA = srcColor[3];
+        }
+
+        fb.data[fbIdx]   = Math.max(0, Math.min(255, Math.round(finalR * 255)));
+        fb.data[fbIdx+1] = Math.max(0, Math.min(255, Math.round(finalG * 255)));
+        fb.data[fbIdx+2] = Math.max(0, Math.min(255, Math.round(finalB * 255)));
+        fb.data[fbIdx+3] = 255; // Always opaque on screen
+      }
+    }
+  }
+
+  ctx.putImageData(fb, 0, 0);
+  document.getElementById('status').textContent =
+    'Done: ' + allObjects.length + ' objects rendered';
+}
+
+render();
+)JS";
+  html << "</script>\n</body>\n</html>\n";
+
   const std::filesystem::path html_path = export_dir / "scene.html";
   std::ofstream html_file(html_path.string());
   if (html_file.is_open())
