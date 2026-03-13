@@ -1,3 +1,5 @@
 ./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin --batch --exec Files/HomeMenuFIFO_Frame1.dff --export-fifo Files/ExportTest
 
 cd build && make -j $(sysctl -n hw.logicalcpu) && cd .. && ./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin -e Files/HomeMenuFIFO_Frame1.dff --export-fifo=Files/ExportTest
+
+make -C build -j $(sysctl -n hw.logicalcpu) && ./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin -e Files/HomeMenuFIFO_Frame1.dff --export-fifo=Files/ExportTest
