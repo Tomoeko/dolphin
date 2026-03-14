@@ -1,0 +1,9 @@
+codesign -s - --force build/Binaries/Dolphin.app/Contents/MacOS/
+Dolphin
+
+lldb -- build/Binaries/Dolphin.app/Contents/MacOS/Dolphin -e Fil
+es/HomeMenuFIFO_Frame1.dff --export-fifo=Files/ExportTest
+
+run
+
+bt
