@@ -140,6 +140,29 @@
     border-color: var(--accent);
 }
 
+.texture-card {
+    background: #252525;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    gap: 12px;
+    border: 2px solid transparent;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    scroll-margin: 10px;
+}
+
+.texture-card:hover {
+    background: #2d2d2d;
+    border-color: #3d3d3d;
+}
+
+.texture-card.selected {
+    background: #2d2d2d;
+    border-color: var(--accent);
+    box-shadow: 0 0 10px rgba(74, 158, 255, 0.3);
+}
+
 .log-btn:hover {
     transform: scale(1.05);
 }

@@ -2,7 +2,7 @@
 
 const canvas = document.getElementById('glcanvas');
 canvas.width = 640;
-canvas.height = 528;
+canvas.height = 360;
 const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
 const statusPanel = document.getElementById('statusPanel');
 const wireframeToggle = document.getElementById('wireframeToggle');
@@ -91,16 +91,18 @@ logAlignmentsBtn.addEventListener('click', () => {
         const metadata = JSON.parse(ov.dataset.metadata || '{}');
         const { src, ...metaWithoutSrc } = metadata;
         
-        // Native coordinate calculations (640x528)
+        // Native coordinate calculations (Locked to target 640x528)
         const nativeW = 640;
         const nativeH = 528;
-        const containerW = comparisonContainer.clientWidth;
-        const containerH = comparisonContainer.clientHeight;
         
-        const nl = Math.round((parseInt(ov.style.left) / containerW) * nativeW);
-        const nt = Math.round((parseInt(ov.style.top) / containerH) * nativeH);
-        const nw = Math.round((parseInt(ov.style.width) / containerW) * nativeW);
-        const nh = Math.round((parseInt(ov.style.height) / containerH) * nativeH);
+        // We assume the container's contents are intended to be a 640x528 grid.
+        // If the container itself is shrunk (e.g. 360px high), we still want 
+        // a 1:1 mapping if the user is dragging in a 640x528 context.
+        // The most robust way is to use the style values directly if they were set in a 640x528 space.
+        const nl = Math.round(parseInt(ov.style.left));
+        const nt = Math.round(parseInt(ov.style.top));
+        const nw = Math.round(parseInt(ov.style.width));
+        const nh = Math.round(parseInt(ov.style.height));
 
         return {
             texture: metaWithoutSrc, 
@@ -143,6 +145,39 @@ tabComparison.addEventListener('click', () => {
     // Auto-load reference image if not already loaded
     if (referenceImg.style.display === 'none') {
         checkAndLoadReference();
+    }
+});
+
+function selectTextureByAddress(addrHex) {
+    if (!addrHex) return;
+    const cardId = `tex-card-${addrHex.toUpperCase()}`;
+    const allCards = document.querySelectorAll('.texture-card');
+    allCards.forEach(c => c.classList.remove('selected'));
+    
+    const card = document.getElementById(cardId);
+    if (card) {
+        card.classList.add('selected');
+        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+let rendererPrimitives = []; // Array of { bbox: [minX, minY, maxX, maxY], addr: "..." }
+
+canvas.addEventListener('click', (e) => {
+    if (!tabRenderer.classList.contains('active')) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Primitives are stored in render order. Check from top-most (last drawn)
+    for (let i = rendererPrimitives.length - 1; i >= 0; i--) {
+        const p = rendererPrimitives[i];
+        if (x >= p.bbox[0] && x <= p.bbox[2] && y >= p.bbox[1] && y <= p.bbox[3]) {
+            if (p.addr) {
+                selectTextureByAddress(p.addr);
+                return;
+            }
+        }
     }
 });
 
@@ -192,7 +227,7 @@ comparisonContainer.addEventListener('mousemove', (e) => {
     
     // Reference image is assumed to be 640x528 (native GX resolution for this frame)
     const nativeW = 640;
-    const nativeH = 528;
+    const nativeH = 360;
     
     // Scale from container pixels to native pixels
     const nx = Math.round((x / referenceImg.clientWidth) * nativeW);
@@ -433,10 +468,13 @@ class VCD {
 
 class XFMemory {
     constructor() {
-        this.posMatrices = new Float32Array(256); // 0x0000 to 0x00FF
+        this.posMatrices = new Float32Array(1024); // Support full 64 matrices + overhead
+        this.projectionMatrix = mat4.create();
+        mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000); // Default
     }
     reset() {
         this.posMatrices.fill(0);
+        mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000);
     }
 }
 const XFState = new XFMemory();
@@ -747,6 +785,7 @@ function addTextureToInspector(unitIndex, rgba8) {
         card = document.createElement('div');
         card.id = cardId;
         card.className = 'texture-card';
+        card.addEventListener('click', () => selectTextureByAddress(addrHex));
         list.appendChild(card);
     }
 
@@ -847,17 +886,24 @@ function createOverlay(data, x, y) {
         }, 2000);
     };
 
+    overlay.addEventListener('mouseenter', showLabel);
+    overlay.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const metadata = JSON.parse(overlay.dataset.metadata);
+        if (metadata.addr) {
+            selectTextureByAddress(metadata.addr);
+        }
+        showLabel();
+    });
     const updateLabel = (l, t, w, h) => {
         const scaleX = (w / data.w).toFixed(2);
         const scaleY = (h / data.h).toFixed(2);
         
-        // Calculate native coordinates
-        const nativeW = 640;
-        const nativeH = 528;
-        const nl = Math.round((l / comparisonContainer.clientWidth) * nativeW);
-        const nt = Math.round((t / comparisonContainer.clientHeight) * nativeH);
-        const nw = Math.round((w / comparisonContainer.clientWidth) * nativeW);
-        const nh = Math.round((h / comparisonContainer.clientHeight) * nativeH);
+        // Calculate native coordinates (Locked to 640x528)
+        const nl = Math.round(l);
+        const nt = Math.round(t);
+        const nw = Math.round(w);
+        const nh = Math.round(h);
 
         label.innerHTML = `
             <div>Screen: ${Math.round(l)},${Math.round(t)} | ${Math.round(w)}x${Math.round(h)}</div>
@@ -1055,13 +1101,36 @@ function applyCPCommand(cmd, val) {
         CPState.matIdxA = val;
     }
 }
-
 function applyXFCommand(addr, count, data) {
-    // PosMatrices are at 0x0000 - 0x00FF
-    if (addr >= 0 && addr + count <= 256) {
-        const floatView = new Float32Array(new Uint32Array(data).buffer);
-        for(let i=0; i<count; i++) {
-            XFState.posMatrices[addr + i] = floatView[i];
+    const floatView = new Float32Array(new Uint32Array(data).buffer);
+    
+    // PosMatrices are at 0x0000 - 0x03FF in XF memory (vector-based addressing)
+    // 64 matrices * 3 vectors/matrix = 192 vectors.
+    // Each vector is 4 floats. So float index is vector_addr * 4.
+    if (addr < 0x1000) { 
+        const floatOffset = addr * 4;
+        if (floatOffset + count <= 1024) {
+            for(let i=0; i<count; i++) {
+                XFState.posMatrices[floatOffset + i] = floatView[i];
+            }
+        }
+    } 
+    // Projection Matrix is at 0x1010 (7 floats typically)
+    else if (addr >= 0x1010 && addr <= 0x1020) {
+        const offset = addr - 0x1010;
+        // Float 0: Type (0=Persp, 1=Ortho)
+        // Floats 1-6: Projection parameters
+        // For Ortho: left, right, top, bottom, near, far
+        // For Persp: cot_fov, aspect, near, far (2 ignored?)
+        if (floatView.length >= 7) {
+            const type = floatView[0];
+            const p = floatView.slice(1);
+            if (type === 1) { // Ortho
+                mat4.ortho(XFState.projectionMatrix, p[0], p[1], p[3], p[2], p[4], p[5]); 
+            } else if (type === 0) { // Persp
+                mat4.perspective(XFState.projectionMatrix, 2 * Math.atan(1/p[0]), p[1], p[2], p[3]);
+            }
+            console.log("XF Projection Updated:", type === 1 ? "Ortho" : "Persp", p);
         }
     }
 }
@@ -1114,14 +1183,15 @@ function tryRender() {
     BPState.reset();
     resetTextureInspector(); 
     drawCalls = 0;
+    rendererPrimitives = [];
 
-    // Setup an orthographic projection (Wii home menu is 640x480)
+    // Setup an orthographic projection (Wii home menu is 640x480, but user expects 360 here)
     const projectionMatrix = mat4.create();
-    mat4.ortho(projectionMatrix, 0, 640, 480, 0, -1000, 1000);
+    mat4.ortho(projectionMatrix, 0, 640, 360, 0, -1000, 1000);
     
     const modelViewMatrix = mat4.create();
 
-    gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
+    gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, XFState.projectionMatrix);
     gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
 
     let triangles = 0;
@@ -1370,10 +1440,9 @@ function drawPrimitive(cmd) {
         // Resolve ModelView Matrix Index (Already resolved at start of loop)
 
         // Apply CPState XF ModelView Matrix (3x4 Matrix stored continuously)
-        // A 3x4 matrix takes 12 floats in XF memory
-        // Dolphin actually addresses them by 3-float vectors in some cases, 
-        // but typically PosMatIdx * 12 is the float offset
-        const mtxBase = posMatIdx * 12;
+        // GX Matrix indices in the vertex or MATINDEX are vector offsets.
+        // Each vector is 4 floats. Matrix N is at vector 3*N.
+        const mtxBase = posMatIdx * 4;
         const m00 = XFState.posMatrices[mtxBase + 0], m01 = XFState.posMatrices[mtxBase + 1], m02 = XFState.posMatrices[mtxBase + 2], m03 = XFState.posMatrices[mtxBase + 3];
         const m10 = XFState.posMatrices[mtxBase + 4], m11 = XFState.posMatrices[mtxBase + 5], m12 = XFState.posMatrices[mtxBase + 6], m13 = XFState.posMatrices[mtxBase + 7];
         const m20 = XFState.posMatrices[mtxBase + 8], m21 = XFState.posMatrices[mtxBase + 9], m22 = XFState.posMatrices[mtxBase + 10],m23 = XFState.posMatrices[mtxBase + 11];
@@ -1440,6 +1509,21 @@ function drawPrimitive(cmd) {
 
     gl.drawArrays(glPrimitive, 0, numVerts);
     
+    // Store primitive for selection
+    if (boundTex) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < positions.length; i += 3) {
+            minX = Math.min(minX, positions[i]);
+            minY = Math.min(minY, positions[i+1]);
+            maxX = Math.max(maxX, positions[i]);
+            maxY = Math.max(maxY, positions[i+1]);
+        }
+        rendererPrimitives.push({
+            bbox: [minX, minY, maxX, maxY],
+            addr: BPState.textures[0].imageBase.toString(16).toUpperCase()
+        });
+    }
+
     gl.deleteBuffer(posBuffer);
     gl.deleteBuffer(colorBuffer);
     gl.deleteBuffer(texCoordBuffer);
