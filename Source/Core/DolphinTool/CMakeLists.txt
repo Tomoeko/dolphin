@@ -24,6 +24,8 @@ endif()
 
 target_link_libraries(dolphin-tool
 PRIVATE
+  core
+  videocommon
   discio
   uicommon
   cpp-optparse

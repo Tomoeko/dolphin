@@ -3,9 +3,12 @@
 
 #include "DolphinTool/FifoCommand.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
-#include <iostream>
 #include <fstream>
+#include <iostream>
+#include <thread>
 #include <vector>
 
 #include <OptionParser.h>
@@ -13,9 +16,19 @@
 #include <fmt/format.h>
 
 #include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 #include "Common/Swap.h"
+#include "Core/Boot/Boot.h"
+#include "Core/BootManager.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Core.h"
+#include "Core/FifoPlayer/FifoPlayer.h"
+#include "Core/System.h"
+#include "UICommon/UICommon.h"
 #include "VideoCommon/CPMemory.h"
+#include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/OpcodeDecoding.h"
+#include "VideoCommon/VideoBackendBase.h"
 
 namespace DolphinTool
 {
@@ -133,8 +146,109 @@ struct FileMemoryUpdate
 };
 #pragma pack(pop)
 
+static int ScreenshotCommand(const std::vector<std::string>& args)
+{
+  optparse::OptionParser parser;
+  parser.add_option("-i", "--in")
+      .type("string")
+      .action("store")
+      .help("Path to input .dff FILE.")
+      .metavar("FILE");
+  parser.add_option("-o", "--out")
+      .type("string")
+      .action("store")
+      .help("Path to output PNG FILE.")
+      .metavar("FILE");
+
+  const optparse::Values& options = parser.parse_args(args);
+
+  if (!options.is_set("in") || !options.is_set("out"))
+  {
+    fmt::print(std::cerr, "Error: Missing input or output\n");
+    return EXIT_FAILURE;
+  }
+
+  const std::string input_path = options["in"];
+  const std::string output_path = options["out"];
+
+  UICommon::SetUserDirectory("");
+  
+  // Force single core and software backend for reliability in headless tool
+  Config::Init();
+  Config::SetCurrent(Config::MAIN_CPU_THREAD, false);
+  Config::SetCurrent(Config::MAIN_GFX_BACKEND, "Software");
+  Config::SetCurrent(Config::MAIN_FIFOPLAYER_LOOP_REPLAY, false);
+
+  UICommon::Init();
+
+  auto& system = Core::System::GetInstance();
+  
+  WindowSystemInfo wsi;
+  VideoBackendBase::PopulateBackendInfo(wsi);
+  UICommon::InitControllers(wsi);
+
+  auto boot = BootParameters::GenerateFromFile(input_path);
+  if (!boot)
+  {
+    fmt::print(std::cerr, "Error: Failed to load DFF file {}\n", input_path);
+    return EXIT_FAILURE;
+  }
+
+  std::atomic<bool> callback_triggered = false;
+  system.GetFifoPlayer().SetFrameWrittenCallback([&] {
+    if (callback_triggered.exchange(true))
+      return;
+
+    if (g_frame_dumper)
+    {
+      g_frame_dumper->SaveScreenshot(output_path);
+    }
+  });
+
+  if (!BootManager::BootCore(system, std::move(boot), wsi))
+  {
+    fmt::print(std::cerr, "Error: Failed to boot DFF file\n");
+    return EXIT_FAILURE;
+  }
+
+  int timeout_ms = 30000;
+  while (!callback_triggered && timeout_ms > 0)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    timeout_ms -= 100;
+  }
+
+  if (callback_triggered)
+  {
+    // Wait for the dumper thread to finish writing the PNG.
+    // FrameDumper should ideally provide an event for this, but for now we sleep.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  else
+  {
+    fmt::print(std::cerr, "Error: Screenshot callback timed out.\n");
+    Core::Stop(system);
+    Core::Shutdown(system);
+    return EXIT_FAILURE;
+  }
+
+  Core::Stop(system);
+  Core::Shutdown(system);
+  UICommon::ShutdownControllers();
+  UICommon::Shutdown();
+
+  fmt::print(std::cout, "Screenshot saved to {}\n", output_path);
+  return EXIT_SUCCESS;
+}
+
 int FifoCommand(const std::vector<std::string>& args)
 {
+  if (!args.empty() && args[0] == "screenshot")
+  {
+    std::vector<std::string> screenshot_args(args.begin() + 1, args.end());
+    return ScreenshotCommand(screenshot_args);
+  }
+
   optparse::OptionParser parser;
   parser.usage("usage: fifo [options]...");
 

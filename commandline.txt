@@ -1,5 +1,8 @@
-./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin --batch --exec Files/HomeMenuFIFO_Frame1.dff --export-fifo Files/ExportTest
+# Export FIFO to JSON and MEM
+./build/Binaries/dolphin-tool fifo -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/HomeMenuFIFO_Frame1.json
 
-cd build && make -j $(sysctl -n hw.logicalcpu) && cd .. && ./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin -e Files/HomeMenuFIFO_Frame1.dff --export-fifo=Files/ExportTest
+# Generate Headless Screenshot (Ground Truth)
+./build/Binaries/dolphin-tool fifo screenshot -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/ground_truth.png
 
-make -C build -j $(sysctl -n hw.logicalcpu) && ./build/Binaries/Dolphin.app/Contents/MacOS/Dolphin -e Files/HomeMenuFIFO_Frame1.dff --export-fifo=Files/ExportTest
+# Build and Export
+make -C build -j $(sysctl -n hw.logicalcpu) dolphin-tool && ./build/Binaries/dolphin-tool fifo -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/HomeMenuFIFO_Frame1.json

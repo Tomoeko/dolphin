@@ -1,6 +1,8 @@
 // main.js
 
 const canvas = document.getElementById('glcanvas');
+canvas.width = 640;
+canvas.height = 480;
 const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
 const statusPanel = document.getElementById('statusPanel');
 const wireframeToggle = document.getElementById('wireframeToggle');
@@ -33,8 +35,10 @@ logAlignmentsBtn.addEventListener('click', () => {
     const overlays = overlayLayer.querySelectorAll('.texture-overlay');
     const logs = Array.from(overlays).map(ov => {
         const metadata = JSON.parse(ov.dataset.metadata || '{}');
+        // Remove 'src' (image data) to keep logs clean
+        const { src, ...metaWithoutSrc } = metadata;
         return {
-            texture: metadata, // Full metadata (addr, format, res, etc)
+            texture: metaWithoutSrc, 
             visualPosition: {
                 x: parseInt(ov.style.left),
                 y: parseInt(ov.style.top),
@@ -554,7 +558,7 @@ const TexDecoder = {
                             const avgG = (G1 + G2) >> 1;
                             const avgB = (B1 + B2) >> 1;
                             colors[2] = [avgR, avgG, avgB, 255];
-                            colors[3] = [avgR, avgG, avgB, 0]; // Special GX transparent color
+                            colors[3] = [0, 0, 0, 0]; // Hardware transparent (Black with Alpha 0)
                         }
 
                         for (let ty = 0; ty < 4; ty++) {
@@ -977,9 +981,9 @@ function tryRender() {
     resetTextureInspector(); 
     drawCalls = 0;
 
-    // Setup an orthographic projection (Wii home menu is often rendered in 2D ortho)
+    // Setup an orthographic projection (Wii home menu is 640x480)
     const projectionMatrix = mat4.create();
-    mat4.ortho(projectionMatrix, 0, 640, 528, 0, -1000, 1000);
+    mat4.ortho(projectionMatrix, 0, 640, 480, 0, -1000, 1000);
     
     const modelViewMatrix = mat4.create();
 
@@ -1148,8 +1152,15 @@ function drawPrimitive(cmd) {
         let r=1, g=1, b=1, a=1;
         let u=0, v=0;
 
-        // Skip Position Matrix Index (1 byte if enabled)
-        if (vcd.PMIdx) ptr += 1;
+        // Read Position Matrix Index (1 byte if enabled)
+        let posMatIdx = 0;
+        if (vcd.PMIdx) {
+            posMatIdx = dataView.getUint8(ptr);
+            ptr += 1;
+        } else {
+            // Use MATINDEX_A PosMatIdx (bits 0-5)
+            posMatIdx = CPState.matIdxA & 0x3F;
+        }
         // Skip Texture Matrix Indices
         if (vcd.T0MIdx) ptr += 1;
         if (vcd.T1MIdx) ptr += 1;
@@ -1222,15 +1233,7 @@ function drawPrimitive(cmd) {
             }
         }
 
-        // Resolve ModelView Matrix Index
-        let posMatIdx = 0;
-        if (vcd.PMIdx) {
-            // Read 1-byte PosMatIdx from pointer 
-            posMatIdx = dataView.getUint8(ptr - 1); // We already ptr+=1 above
-        } else {
-            // Use MATINDEX_A PosMatIdx (bits 0-5)
-            posMatIdx = CPState.matIdxA & 0x3F;
-        }
+        // Resolve ModelView Matrix Index (Already resolved at start of loop)
 
         // Apply CPState XF ModelView Matrix (3x4 Matrix stored continuously)
         // A 3x4 matrix takes 12 floats in XF memory

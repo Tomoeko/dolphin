@@ -284,13 +284,13 @@ CPU::State FifoPlayer::AdvanceFrame()
     FlushWGP();
   }
 
-  if (m_FrameWrittenCb)
-    m_FrameWrittenCb();
-
   if (m_EarlyMemoryUpdates && m_CurrentFrame == m_FrameRangeStart)
     WriteAllMemoryUpdates();
 
   WriteFrame(m_File->GetFrame(m_CurrentFrame), m_FrameInfo[m_CurrentFrame]);
+
+  if (m_FrameWrittenCb)
+    m_FrameWrittenCb();
 
   ++m_CurrentFrame;
   return CPU::State::Running;
