@@ -356,8 +356,10 @@ const fragmentShaderSource = `#version 300 es
     precision mediump float;
     in lowp vec4 vColor;
     in highp vec2 vTexCoord;
-    uniform sampler2D uSampler;
-    uniform int uHasTexture;
+    uniform sampler2D uSampler0;
+    uniform sampler2D uSampler1;
+    uniform int uHasTexture0;
+    uniform int uHasTexture1;
     uniform vec4 uMatColor;
     uniform int uAlphaTest; // bits 0-2 comp0, 3-5 comp1, 6-7 logic
     uniform vec2 uAlphaRef; // x=ref0, y=ref1
@@ -377,7 +379,12 @@ const fragmentShaderSource = `#version 300 es
     }
 
     void main() {
-        vec4 texColor = (uHasTexture == 1) ? texture(uSampler, vTexCoord) : vec4(1.0);
+        vec4 tex0 = (uHasTexture0 == 1) ? texture(uSampler0, vTexCoord) : vec4(1.0);
+        vec4 tex1 = (uHasTexture1 == 1) ? texture(uSampler1, vTexCoord) : vec4(1.0);
+        
+        // Multi-texture combine: simple product (emulating basic TEV)
+        vec4 texColor = tex0 * tex1;
+        
         vec4 color = vColor * uMatColor * texColor;
 
         if (uAlphaTest != 0) {
@@ -431,6 +438,10 @@ const programInfo = {
         uAlphaTest: gl.getUniformLocation(shaderProgram, 'uAlphaTest'),
         uAlphaRef: gl.getUniformLocation(shaderProgram, 'uAlphaRef'),
         uMatColor: gl.getUniformLocation(shaderProgram, 'uMatColor'),
+        uSampler0: gl.getUniformLocation(shaderProgram, 'uSampler0'),
+        uSampler1: gl.getUniformLocation(shaderProgram, 'uSampler1'),
+        uHasTexture0: gl.getUniformLocation(shaderProgram, 'uHasTexture0'),
+        uHasTexture1: gl.getUniformLocation(shaderProgram, 'uHasTexture1'),
     },
 };
 
@@ -1579,9 +1590,14 @@ Est. Triangles: ${triangles}`;
 }
 
 function drawPrimitive(cmd) {
-    // GX primitive drawing.
-    // We get unindexed data directly from dolphin-tool:
-    // array of bytes representing vertex_size per vertex.
+    // Use JSON-provided ground truth state if available to bypass JS state tracking errors
+    if (cmd.vcd_lo !== undefined) {
+        CPState.vcd[cmd.vat].parseLO(cmd.vcd_lo);
+        CPState.vcd[cmd.vat].parseHI(cmd.vcd_hi);
+        CPState.vat[cmd.vat].parseA(cmd.vat_a);
+        CPState.vat[cmd.vat].parseB(cmd.vat_b);
+        CPState.vat[cmd.vat].parseC(cmd.vat_c);
+    }
     
     if (!cmd.data || cmd.data.length === 0) return;
 
@@ -1631,7 +1647,7 @@ function drawPrimitive(cmd) {
         }
     }
 
-    let boundTex = false;
+    let unitsToBind = [];
     let primaryUnit = -1;
     for (let i = 0; i < 8; i++) {
         const hasTex = (i === 0 && vcd.Tex0) || (i === 1 && vcd.Tex1) || (i === 2 && vcd.Tex2) || (i === 3 && vcd.Tex3) ||
@@ -1642,25 +1658,33 @@ function drawPrimitive(cmd) {
                 // If the texture is hidden, we skip this draw call for visual debugging
                 return;
             }
-            primaryUnit = i;
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, BPState.textures[i].webglTexture);
-            boundTex = true;
-            break;
+            unitsToBind.push(i);
         }
     }
-    if (!boundTex) {
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, null);
-    }
 
-    // Set uniform to tell shader whether we have a texture
-    const uHasTexture = gl.getUniformLocation(shaderProgram, 'uHasTexture');
-    gl.uniform1i(uHasTexture, boundTex ? 1 : 0);
-    
-    // Set uSampler to texture unit 0
-    const uSampler = gl.getUniformLocation(shaderProgram, 'uSampler');
-    gl.uniform1i(uSampler, 0);
+    // Bind up to 2 texture units
+    gl.activeTexture(gl.TEXTURE0);
+    if (unitsToBind.length > 0) {
+        gl.bindTexture(gl.TEXTURE_2D, BPState.textures[unitsToBind[0]].webglTexture);
+        gl.uniform1i(programInfo.uniformLocations.uHasTexture0, 1);
+        primaryUnit = unitsToBind[0];
+    } else {
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.uniform1i(programInfo.uniformLocations.uHasTexture0, 0);
+    }
+    gl.uniform1i(programInfo.uniformLocations.uSampler0, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    if (unitsToBind.length > 1) {
+        gl.bindTexture(gl.TEXTURE_2D, BPState.textures[unitsToBind[1]].webglTexture);
+        gl.uniform1i(programInfo.uniformLocations.uHasTexture1, 1);
+    } else {
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.uniform1i(programInfo.uniformLocations.uHasTexture1, 0);
+    }
+    gl.uniform1i(programInfo.uniformLocations.uSampler1, 1);
+
+    const boundTex = unitsToBind.length > 0;
 
     // Apply Material Color (Usually MatColor0)
     gl.uniform4fv(programInfo.uniformLocations.uMatColor, BPState.matColors[0]);
@@ -1984,12 +2008,12 @@ function drawPrimitive(cmd) {
             const cw = pm[3] * x + pm[7] * y + pm[11] * z + pm[15];
 
             if (cw !== 0) {
-                const ndcX = cx / cw;
+            const ndcX = cx / cw;
                 const ndcY = cy / cw;
                 const px = (ndcX + 1.0) * 320;
                 const py = (1.0 - ndcY) * 240; // 0 at Top for selection mapping (640x480)
                 minX = Math.min(minX, px); minY = Math.min(minY, py);
-                maxX = Math.max(maxX, px); maxY = Math.max(maxY, py);
+                maxX = Math.max(maxX, px);                maxY = Math.max(maxY, py);
             }
         }
         
@@ -2003,7 +2027,8 @@ function drawPrimitive(cmd) {
                 blendMode: BPState.blendMode,
                 matColor0: Array.from(BPState.matColors[0]),
                 matColor1: Array.from(BPState.matColors[1])
-            }
+            },
+            groundTruth: cmd.vcd_lo !== undefined ? { vcd: cmd.vcd_lo, vat: cmd.vat_a } : null
         });
     }
 }
@@ -2136,4 +2161,60 @@ window.addEventListener('DOMContentLoaded', () => {
             statusPanel.innerText = 'Waiting for files... Please upload manually.';
             console.log("Auto-load skipped:", e.message);
         });
+});
+
+// New Debuggers
+document.getElementById('copyReport').addEventListener('click', () => {
+    const scrubber = document.getElementById('drawCallScrubber');
+    const val = parseInt(scrubber.value);
+    const max = parseInt(scrubber.max);
+    
+    let report = "--- Dolphin WebGL Viewer Technical Report ---\n";
+    report += `Timestamp: ${new Date().toLocaleString()}\n`;
+    report += `Draw Call Selection: ${val === max ? "All (No limit)" : val}\n`;
+    report += `Total Decoded Textures: ${GLOBAL_TEXTURE_CACHE.size}\n\n`;
+    
+    if (val !== max) {
+        const p = rendererPrimitives.find(p => p.drawCallIndex === (val - 1));
+        if (p) {
+            report += "## Primitive Information\n";
+            report += `- Address: 0x${p.texAddr || 'None'}\n`;
+            report += `- Bounding Box: [${p.bbox.map(v => Math.round(v)).join(', ')}]\n`;
+            report += `- ZMode: 0x${p.states.zMode.toString(16)}\n`;
+            report += `- AlphaTest: 0x${p.states.alphaTest.toString(16)}\n`;
+            report += `- BlendMode: 0x${p.states.blendMode.toString(16)}\n`;
+            report += `- MatColor0: ${JSON.stringify(p.states.matColor0)}\n`;
+            if (p.groundTruth) {
+                report += `- Ground Truth State Used: Yes (vcd=${p.groundTruth.vcd}, vat=${p.groundTruth.vat})\n`;
+            }
+            report += "\n";
+        }
+    }
+    
+    report += "## Cached Textures\n";
+    GLOBAL_TEXTURE_CACHE.forEach((tex, addr) => {
+        const formatName = FORMAT_NAMES[tex.format] || `0x${tex.format.toString(16)}`;
+        report += `- 0x${addr}: ${tex.width}x${tex.height} (${formatName})\n`;
+    });
+    
+    navigator.clipboard.writeText(report).then(() => {
+        alert("Technical report copied to clipboard! Check the console for more details.");
+        console.log("[Technical Report]", report);
+    });
+});
+
+document.getElementById('diffToggle').addEventListener('change', (e) => {
+    const isActive = e.target.checked;
+    if (isActive) {
+        document.body.classList.add('visual-diff-active');
+        const diffOverlay = document.getElementById('diffOverlay');
+        const refImg = document.getElementById('referenceImg');
+        if (refImg && refImg.src) {
+            diffOverlay.style.backgroundImage = `url(${refImg.src})`;
+        }
+        statusPanel.innerText = 'Visual Diff Mode Active: Showing abs(Render - GroundTruth)';
+    } else {
+        document.body.classList.remove('visual-diff-active');
+        statusPanel.innerText = 'Visual Diff Mode Disabled.';
+    }
 });

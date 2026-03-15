@@ -38,6 +38,10 @@
                     <input type="checkbox" id="wireframeToggle">
                     <label for="wireframeToggle">Wireframe Mode</label>
                 </div>
+                <div class="toggle-switch">
+                    <input type="checkbox" id="diffToggle">
+                    <label for="diffToggle">Visual Diff Mode</label>
+                </div>
             </div>
 
             <div class="control-group" id="debugControls">
@@ -54,6 +58,7 @@
                     <div class="state-row"><span>MatColor1:</span> <span id="valMatColor1">-</span></div>
                     <div class="state-row"><span>Texture:</span> <span id="valTexture">-</span></div>
                 </div>
+                <button id="copyReport" class="action-btn-full" style="margin-top: 10px;">Copy Technical Report</button>
             </div>
 
             <div class="status-panel" id="statusPanel">
@@ -71,6 +76,7 @@
             <div id="rendererContent" class="tab-view active">
                 <div class="canvas-container" style="position: relative;">
                     <canvas id="glcanvas" width="640" height="360"></canvas>
+                    <div id="diffOverlay" class="diff-overlay"></div>
                     <svg id="rendererOverlay" width="640" height="360" style="position: absolute; top: 0; left: 0; pointer-events: none;"></svg>
                 </div>
             </div>

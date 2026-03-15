@@ -73,7 +73,9 @@ public:
     for (u32 i = 0; i < total_size; i++) {
         fmt::print(m_out, "{}{}", vertex_data[i], (i == total_size - 1) ? "" : ", ");
     }
-    fmt::print(m_out, "]}},\n");
+    fmt::print(m_out, "], \"vcd_lo\": {}, \"vcd_hi\": {}, \"vat_a\": {}, \"vat_b\": {}, \"vat_c\": {}}},\n",
+               m_cpmem.vtx_desc.low.Hex, m_cpmem.vtx_desc.high.Hex,
+               m_cpmem.vtx_attr[vat].g0.Hex, m_cpmem.vtx_attr[vat].g1.Hex, m_cpmem.vtx_attr[vat].g2.Hex);
   }
 
   OPCODE_CALLBACK(void OnDisplayList(const u32 address, const u32 size))
