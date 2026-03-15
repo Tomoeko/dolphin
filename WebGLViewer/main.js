@@ -1234,7 +1234,8 @@ function applyCPCommand(cmd, val) {
     }
 }
 function applyXFCommand(addr, count, data) {
-    const floatView = new Float32Array(new Uint32Array(data).buffer);
+    const intView = new Uint32Array(data);
+    const floatView = new Float32Array(intView.buffer);
     
     // PosMatrices are at float-based offsets in our JSON stream
     if (addr < 0x1000) { 
@@ -1256,21 +1257,21 @@ function applyXFCommand(addr, count, data) {
     else if (addr >= 0x1020 && addr <= 0x1026) {
         const offset = addr - 0x1020;
         if (offset + floatView.length > 6) {
-            const type = floatView[6 - offset];
+            const type = intView[6 - offset]; // READ AS INT!
             XFState.projectionType = type;
             const p = floatView;
             if (p.length >= 6) {
                 const pm = XFState.projectionMatrix;
-                if (type === 1) { // Ortho (p0=X scale, p1=Y scale, p2=Z scale, p3=X trans, p4=Y trans, p5=Z trans)
-                    pm[0] = p[0]; pm[4] = 0;    pm[8] = 0;    pm[12] = p[3];
-                    pm[1] = 0;    pm[5] = p[1]; pm[9] = 0;    pm[13] = p[4];
-                    pm[2] = 0;    pm[6] = 0;    pm[10] = p[2];pm[14] = p[5];
-                    pm[3] = 0;    pm[7] = 0;    pm[11] = 0;   pm[15] = 1;
-                } else if (type === 0) { // Persp
-                    pm[0] = p[0]; pm[4] = 0;    pm[8] = p[1]; pm[12] = 0;
-                    pm[1] = 0;    pm[5] = p[2]; pm[9] = p[3]; pm[13] = 0;
+                if (type === 1) { // Ortho (p0=X scale, p1=X trans, p2=Y scale, p3=Y trans, p4=Z scale, p5=Z trans)
+                    pm[0] = p[0]; pm[4] = 0;    pm[8] =  0;   pm[12] = p[1];
+                    pm[1] = 0;    pm[5] = p[2]; pm[9] =  0;   pm[13] = p[3];
                     pm[2] = 0;    pm[6] = 0;    pm[10] = p[4];pm[14] = p[5];
-                    pm[3] = 0;    pm[7] = 0;    pm[11] = -1;  pm[15] = 0;
+                    pm[3] = 0;    pm[7] = 0;    pm[11] = 0;   pm[15] = 1;
+                } else if (type === 0) { // Persp (p0=X scale, p1=X trans, p2=Y scale, p3=Y trans, p4=Z scale, p5=Z trans)
+                    pm[0] = p[0]; pm[4] = 0;    pm[8] =  p[1]; pm[12] = 0;
+                    pm[1] = 0;    pm[5] = p[2]; pm[9] =  p[3]; pm[13] = 0;
+                    pm[2] = 0;    pm[6] = 0;    pm[10] = p[4]; pm[14] = p[5];
+                    pm[3] = 0;    pm[7] = 0;    pm[11] = -1;   pm[15] = 0;
                 }
             }
         }
