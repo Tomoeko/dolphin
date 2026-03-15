@@ -72,9 +72,17 @@ tabComparison.addEventListener('click', () => {
 });
 
 function checkAndLoadReference() {
+    const syncHeight = () => {
+        const container = document.getElementById('comparisonContainer');
+        const imgRatio = referenceImg.naturalHeight / referenceImg.naturalWidth;
+        container.style.height = `${container.clientWidth * imgRatio}px`;
+        container.style.minHeight = container.style.height;
+    };
+
     referenceImg.onload = () => {
         refImgStatus.style.display = 'none';
         referenceImg.style.display = 'block';
+        syncHeight();
     };
     referenceImg.onerror = () => {
         refImgStatus.innerText = 'Reference image (HomeMenuFIFO_Frame1.png) not found in data/.';
@@ -83,6 +91,7 @@ function checkAndLoadReference() {
     if (referenceImg.src.includes('data/HomeMenuFIFO_Frame1.png')) {
         referenceImg.style.display = 'block';
         refImgStatus.style.display = 'none';
+        if (referenceImg.complete) syncHeight();
     }
 }
 if (!gl) {
@@ -676,8 +685,8 @@ function createOverlay(data, x, y) {
     overlay.dataset.metadata = JSON.stringify(data); // Store for reporting
     
     // Maintain state for current dimensions
-    let curW = data.w;
-    let curH = data.h;
+    let curW = Math.round(data.w);
+    let curH = Math.round(data.h);
     
     overlay.style.width = `${curW}px`;
     overlay.style.height = `${curH}px`;
