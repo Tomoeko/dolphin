@@ -51,6 +51,18 @@
                 <canvas id="glcanvas" width="640" height="528"></canvas>
             </div>
         </main>
+        
+        <!-- Texture Inspector Sidebar -->
+        <aside class="texture-inspector" id="textureInspector">
+            <div class="sidebar-header">
+                <h2>Texture Inspector</h2>
+                <p>Decoded GX Assets</p>
+            </div>
+            <div id="textureList" class="texture-list">
+                <!-- Textures will be injected here -->
+                <div class="empty-state">No textures decoded yet.</div>
+            </div>
+        </aside>
     </div>
     
     <script src="gl-matrix-min.js"></script>

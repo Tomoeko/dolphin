@@ -16,6 +16,12 @@ let memUpdates = [];
 let drawCalls = 0;
 let isWireframe = false;
 
+const FORMAT_NAMES = {
+    0x0: "I4", 0x1: "I8", 0x2: "IA4", 0x3: "IA8",
+    0x4: "RGB565", 0x5: "RGB5A3", 0x6: "RGBA8",
+    0x8: "C4", 0x9: "C8", 0xA: "C14X2", 0xE: "CMPR"
+};
+
 // Basic Shaders
 const vertexShaderSource = `
     attribute vec4 aVertexPosition;
@@ -110,6 +116,21 @@ class VATGroup {
         this.Tex7CoordElements = 0; this.Tex7CoordFormat = 0; this.Tex7Frac = 0;
     }
 
+    reset() {
+        this.PosElements = 0; this.PosFormat = 0; this.PosFrac = 0;
+        this.NormalElements = 0; this.NormalFormat = 0;
+        this.Color0Elements = 0; this.Color0Comp = 0;
+        this.Color1Elements = 0; this.Color1Comp = 0;
+        this.Tex0CoordElements = 0; this.Tex0CoordFormat = 0; this.Tex0Frac = 0;
+        this.Tex1CoordElements = 0; this.Tex1CoordFormat = 0; this.Tex1Frac = 0;
+        this.Tex2CoordElements = 0; this.Tex2CoordFormat = 0; this.Tex2Frac = 0;
+        this.Tex3CoordElements = 0; this.Tex3CoordFormat = 0; this.Tex3Frac = 0;
+        this.Tex4CoordElements = 0; this.Tex4CoordFormat = 0; this.Tex4Frac = 0;
+        this.Tex5CoordElements = 0; this.Tex5CoordFormat = 0; this.Tex5Frac = 0;
+        this.Tex6CoordElements = 0; this.Tex6CoordFormat = 0; this.Tex6Frac = 0;
+        this.Tex7CoordElements = 0; this.Tex7CoordFormat = 0; this.Tex7Frac = 0;
+    }
+
     parseA(val) {
         this.PosElements = val & 1;
         this.PosFormat = (val >> 1) & 7;
@@ -161,6 +182,13 @@ class VCD {
         this.Tex0 = 0; this.Tex1 = 0; this.Tex2 = 0; this.Tex3 = 0;
         this.Tex4 = 0; this.Tex5 = 0; this.Tex6 = 0; this.Tex7 = 0;
     }
+    reset() {
+        this.PMIdx = 0; this.T0MIdx = 0; this.T1MIdx = 0; this.T2MIdx = 0;
+        this.T3MIdx = 0; this.T4MIdx = 0; this.T5MIdx = 0; this.T6MIdx = 0; this.T7MIdx = 0;
+        this.Position = 0; this.Normal = 0; this.Color0 = 0; this.Color1 = 0;
+        this.Tex0 = 0; this.Tex1 = 0; this.Tex2 = 0; this.Tex3 = 0;
+        this.Tex4 = 0; this.Tex5 = 0; this.Tex6 = 0; this.Tex7 = 0;
+    }
     parseLO(val) {
         this.PMIdx = val & 1;
         this.T0MIdx = (val >> 1) & 1;
@@ -191,6 +219,9 @@ class VCD {
 class XFMemory {
     constructor() {
         this.posMatrices = new Float32Array(256); // 0x0000 to 0x00FF
+    }
+    reset() {
+        this.posMatrices.fill(0);
     }
 }
 const XFState = new XFMemory();
@@ -363,6 +394,57 @@ const TexDecoder = {
     }
 };
 
+function resetTextureInspector() {
+    const list = document.getElementById('textureList');
+    list.innerHTML = '<div class="empty-state">No textures decoded yet.</div>';
+}
+
+function createTextureThumbnail(rgba8, width, height) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const imageData = ctx.createImageData(width, height);
+    imageData.data.set(rgba8);
+    ctx.putImageData(imageData, 0, 0);
+    return canvas.toDataURL();
+}
+
+function addTextureToInspector(unitIndex, rgba8) {
+    const tex = BPState.textures[unitIndex];
+    const list = document.getElementById('textureList');
+    const addrHex = tex.imageBase.toString(16).toUpperCase();
+    const cardId = `tex-card-${addrHex}`;
+    
+    // Remove empty state if present
+    const emptyState = list.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    // Check if we already have a card for this unique texture address
+    let card = document.getElementById(cardId);
+    if (!card) {
+        card = document.createElement('div');
+        card.id = cardId;
+        card.className = 'texture-card';
+        list.appendChild(card);
+    }
+
+    const formatName = FORMAT_NAMES[tex.format] || `0x${tex.format.toString(16)}`;
+    const dataUrl = createTextureThumbnail(rgba8, tex.width, tex.height);
+
+    card.innerHTML = `
+        <div class="texture-thumb-container">
+            <img class="texture-thumb" src="${dataUrl}" alt="Texture 0x${addrHex}">
+        </div>
+        <div class="texture-info">
+            <div class="texture-name">Texture @ 0x${addrHex}</div>
+            <div class="texture-meta">Res: ${tex.width} x ${tex.height}</div>
+            <div class="texture-meta">Format: ${formatName}</div>
+            <div class="texture-meta">Last Unit: ${unitIndex}</div>
+        </div>
+    `;
+}
+
 class BPTextureUnit {
     constructor() {
         this.width = 0;
@@ -372,21 +454,35 @@ class BPTextureUnit {
         this.webglTexture = null;
         this.dirty = false;
     }
+    reset() {
+        this.width = 0;
+        this.height = 0;
+        this.format = 0;
+        this.imageBase = 0;
+        this.dirty = false;
+    }
 }
 
 class BPMemory {
     constructor() {
         this.textures = Array(8).fill(null).map(() => new BPTextureUnit());
     }
+    reset() {
+        this.textures.forEach(t => t.reset());
+    }
 }
 const BPState = new BPMemory();
 
-// Application State
 class CPStateTracker {
     constructor() {
         this.vat = Array(8).fill(null).map(() => new VATGroup());
         this.vcd = Array(8).fill(null).map(() => new VCD());
-        this.matIdxA = 0; // Raw u32 value of MATINDEX_A
+        this.matIdxA = 0; 
+    }
+    reset() {
+        this.vat.forEach(v => v.reset());
+        this.vcd.forEach(v => v.reset());
+        this.matIdxA = 0;
     }
 }
 const CPState = new CPStateTracker();
@@ -458,11 +554,6 @@ function applyXFCommand(addr, count, data) {
     }
 }
 
-const FORMAT_NAMES = {
-    0x0: "I4", 0x1: "I8", 0x2: "IA4", 0x3: "IA8",
-    0x4: "RGB565", 0x5: "RGB5A3", 0x6: "RGBA8",
-    0x8: "C4", 0x9: "C8", 0xA: "C14X2", 0xE: "CMPR"
-};
 
 function applyBPCommand(cmd, val) {
     if (cmd >= 0x88 && cmd <= 0x8B) { // TX_SETIMAGE0 (Tex0-Tex3)
@@ -505,6 +596,13 @@ function tryRender() {
 
     gl.useProgram(programInfo.program);
 
+    // Maintain states
+    CPState.reset();
+    XFState.reset();
+    BPState.reset();
+    resetTextureInspector(); 
+    drawCalls = 0;
+
     // Setup an orthographic projection (Wii home menu is often rendered in 2D ortho)
     const projectionMatrix = mat4.create();
     mat4.ortho(projectionMatrix, 0, 640, 528, 0, -1000, 1000);
@@ -514,7 +612,6 @@ function tryRender() {
     gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
     gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
 
-    let drawCalls = 0;
     let triangles = 0;
 
     for (const cmd of frame.commands) {
@@ -550,33 +647,42 @@ function drawPrimitive(cmd) {
     // of the first 8 bytes if it's floats, or shorts.
     // Dolphin extracted the RAW vertex data into cmd.data.
 
-    // Bind texture if Tex0 is enabled
+    // Bind textures and update inspector for all units
     // Note: Emulating TEV stages fully is complex. 
-    // We'll just bind Tex0 and use a simple shader that modulates vertex color.
-    gl.activeTexture(gl.TEXTURE0);
-    let boundTex = false;
-    const vcd = CPState.vcd[cmd.vat]; // Get VCD for current primitive
-    if (vcd.Tex0 && BPState.textures[0].dirty) {
-        const tex = BPState.textures[0];
-        if (tex.width > 0 && tex.height > 0 && tex.imageBase > 0 && memData) {
-            const rgba8 = TexDecoder.decode(tex.width, tex.height, tex.format, tex.imageBase);
-            if (rgba8) {
-                if (!tex.webglTexture) tex.webglTexture = gl.createTexture();
-                gl.bindTexture(gl.TEXTURE_2D, tex.webglTexture);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.width, tex.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba8);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                tex.dirty = false;
+    // We'll decode all units that are dirty and used by the VCD.
+    const vcd = CPState.vcd[cmd.vat];
+    for (let i = 0; i < 8; i++) {
+        const tex = BPState.textures[i];
+        const hasTex = (i === 0 && vcd.Tex0) || (i === 1 && vcd.Tex1) || (i === 2 && vcd.Tex2) || (i === 3 && vcd.Tex3) ||
+                      (i === 4 && vcd.Tex4) || (i === 5 && vcd.Tex5) || (i === 6 && vcd.Tex6) || (i === 7 && vcd.Tex7);
+
+        if (hasTex && tex.dirty) {
+            if (tex.width > 0 && tex.height > 0 && tex.imageBase > 0 && memData) {
+                const rgba8 = TexDecoder.decode(tex.width, tex.height, tex.format, tex.imageBase);
+                if (rgba8) {
+                    if (!tex.webglTexture) tex.webglTexture = gl.createTexture();
+                    gl.activeTexture(gl.TEXTURE0 + i);
+                    gl.bindTexture(gl.TEXTURE_2D, tex.webglTexture);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.width, tex.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba8);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    
+                    addTextureToInspector(i, rgba8);
+                    tex.dirty = false;
+                }
             }
         }
     }
 
-    if (BPState.textures[0].webglTexture) {
+    let boundTex = false;
+    if (vcd.Tex0 && BPState.textures[0].webglTexture) {
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, BPState.textures[0].webglTexture);
         boundTex = true;
     } else {
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, null);
     }
 
