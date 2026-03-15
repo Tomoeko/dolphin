@@ -40,6 +40,20 @@
                 </div>
             </div>
 
+            <div class="control-group" id="debugControls">
+                <h3>4. Debugging Tools</h3>
+                <div class="scrubber-container">
+                    <label for="drawCallScrubber">Draw Call Scrubber: <span id="scrubberValue">All</span></label>
+                    <input type="range" id="drawCallScrubber" min="0" max="0" value="0">
+                </div>
+                <div class="state-inspector" id="stateInspector">
+                    <div class="state-row"><span>Z-Mode:</span> <span id="valZMode">-</span></div>
+                    <div class="state-row"><span>Alpha Test:</span> <span id="valAlphaTest">-</span></div>
+                    <div class="state-row"><span>Blend:</span> <span id="valBlend">-</span></div>
+                    <div class="state-row"><span>Texture:</span> <span id="valTexture">-</span></div>
+                </div>
+            </div>
+
             <div class="status-panel" id="statusPanel">
                 Waiting for files...
             </div>

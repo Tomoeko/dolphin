@@ -26,6 +26,8 @@ let currentPanY = 0;
 let isPanning = false;
 let startX, startY;
 let currentSelectedAddr = null;
+let maxDrawCalls = 0;
+let currentDrawCallLimit = -1; // -1 means no limit (render all)
 
 function updateTransform() {
     // We use translate then scale. For zoom-to-cursor, we adjust pan during the wheel event.
@@ -224,6 +226,7 @@ canvas.addEventListener('click', (e) => {
         if (x >= p.bbox[0] && x <= p.bbox[2] && y >= p.bbox[1] && y <= p.bbox[3]) {
             if (p.addr) {
                 selectTextureByAddress(p.addr);
+                updateStateInspector(p);
                 return;
             }
         }
@@ -231,6 +234,7 @@ canvas.addEventListener('click', (e) => {
     
     // Clicked empty space
     currentSelectedAddr = null;
+    clearStateInspector();
     updateSelectedHighlights();
     document.querySelectorAll('.texture-card').forEach(c => c.classList.remove('selected'));
 });
@@ -347,17 +351,38 @@ const vertexShaderSource = `
 `;
 
 const fragmentShaderSource = `
+    precision mediump float;
     varying lowp vec4 vColor;
     varying highp vec2 vTexCoord;
     uniform sampler2D uSampler;
     uniform int uHasTexture;
+    uniform int uAlphaTest; // bits 0-2 compare func, bits 3-5 ref
+    uniform float uAlphaRef;
 
     void main() {
+        vec4 color;
         if (uHasTexture == 1) {
-            gl_FragColor = vColor * texture2D(uSampler, vTexCoord);
+            color = vColor * texture2D(uSampler, vTexCoord);
         } else {
-            gl_FragColor = vColor;
+            color = vColor;
         }
+
+        if (uAlphaTest != 0) {
+            // Simple Alpha Test: 0=Never, 1=Less, 2=Equal, 3=LEqual, 4=Greater, 5=NEqual, 6=GEqual, 7=Always
+            bool pass = true;
+            if (uAlphaTest == 0) pass = false;
+            else if (uAlphaTest == 1) pass = (color.a < uAlphaRef);
+            else if (uAlphaTest == 2) pass = (color.a == uAlphaRef);
+            else if (uAlphaTest == 3) pass = (color.a <= uAlphaRef);
+            else if (uAlphaTest == 4) pass = (color.a > uAlphaRef);
+            else if (uAlphaTest == 5) pass = (color.a != uAlphaRef);
+            else if (uAlphaTest == 6) pass = (color.a >= uAlphaRef);
+            else if (uAlphaTest == 7) pass = true;
+            
+            if (!pass) discard;
+        }
+
+        gl_FragColor = color;
     }
 `;
 
@@ -388,6 +413,8 @@ const programInfo = {
     uniformLocations: {
         projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
         modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
+        alphaTest: gl.getUniformLocation(shaderProgram, 'uAlphaTest'),
+        alphaRef: gl.getUniformLocation(shaderProgram, 'uAlphaRef'),
     },
 };
 
@@ -725,7 +752,7 @@ const TexDecoder = {
                                     dst[dstOffset + 0] = l;
                                     dst[dstOffset + 1] = l;
                                     dst[dstOffset + 2] = l;
-                                    dst[dstOffset + 3] = 255;
+                                    dst[dstOffset + 3] = l;
                                 }
                             }
                         }
@@ -1156,9 +1183,15 @@ class BPTextureUnit {
 class BPMemory {
     constructor() {
         this.textures = Array(8).fill(null).map(() => new BPTextureUnit());
+        this.zMode = 0;
+        this.alphaTest = 0;
+        this.blendMode = 0;
     }
     reset() {
         this.textures.forEach(t => t.reset());
+        this.zMode = 0;
+        this.alphaTest = 0;
+        this.blendMode = 0;
     }
 }
 const BPState = new BPMemory();
@@ -1190,6 +1223,17 @@ document.getElementById('jsonInput').addEventListener('change', (e) => {
             jsonData = JSON.parse(e.target.result);
             memUpdates = jsonData[0].memory_updates; // Extract memory updates from the first frame
             statusPanel.innerText = 'JSON Loaded. ' + jsonData.length + ' frames found.';
+            
+            // Count total draw calls for scrubber
+            let totalDC = 0;
+            if (jsonData[0].commands) {
+                for (const cmd of jsonData[0].commands) {
+                    if (cmd.type === "Primitive") totalDC++;
+                }
+            }
+            maxDrawCalls = totalDC;
+            setupScrubber(totalDC);
+            
             tryRender();
         } catch (err) {
             statusPanel.innerText = 'Error parsing JSON: ' + err.message;
@@ -1300,6 +1344,12 @@ function applyBPCommand(cmd, val) {
         const unit = (cmd - 0xB4) + 4;
         BPState.textures[unit].imageBase = (val & 0xFFFFFF) << 5;
         BPState.textures[unit].dirty = true;
+    } else if (cmd === 0xF2) { // BLEND_MODE
+        BPState.blendMode = val;
+    } else if (cmd === 0xF3) { // Z_MODE
+        BPState.zMode = val;
+    } else if (cmd === 0xF4) { // ALPHA_TEST
+        BPState.alphaTest = val;
     }
 }
 
@@ -1341,7 +1391,9 @@ function tryRender() {
         } else if (cmd.type === "BP") {
             applyBPCommand(cmd.command, cmd.value);
         } else if (cmd.type === "Primitive") {
-            drawPrimitive(cmd);
+            if (currentDrawCallLimit === -1 || drawCalls < currentDrawCallLimit) {
+                drawPrimitive(cmd);
+            }
             drawCalls++;
             // A Triangle strip (primitive=1) creates N-2 triangles
             // Defaulting roughly to triangle fans/strips math
@@ -1640,6 +1692,30 @@ function drawPrimitive(cmd) {
     // WebGL doesn't support Quads native, so we'll mock it 
     // by using Triangle Fan or points for now.
     
+    // Apply GX State (ZMode, BlendMode, AlphaTest)
+    const zm = BPState.zMode;
+    if (zm & 1) {
+        gl.enable(gl.DEPTH_TEST);
+        const funcs = [gl.NEVER, gl.LESS, gl.EQUAL, gl.LEQUAL, gl.GREATER, gl.NOTEQUAL, gl.GEQUAL, gl.ALWAYS];
+        gl.depthFunc(funcs[(zm >> 1) & 7]);
+    } else {
+        gl.disable(gl.DEPTH_TEST);
+    }
+    gl.depthMask((zm >> 4) & 1);
+
+    const bm = BPState.blendMode;
+    if (bm & 1) {
+        gl.enable(gl.BLEND);
+        const factors = [gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA];
+        gl.blendFunc(factors[(bm >> 5) & 7], factors[(bm >> 2) & 7]);
+    } else {
+        gl.disable(gl.BLEND);
+    }
+
+    const at = BPState.alphaTest;
+    gl.uniform1i(programInfo.uniformLocations.alphaTest, at & 7);
+    gl.uniform1f(programInfo.uniformLocations.alphaRef, ((at >> 8) & 0xFF) / 255.0);
+
     let glPrimitive = gl.TRIANGLE_FAN;
     
     if (isWireframe) {
@@ -1692,7 +1768,14 @@ function drawPrimitive(cmd) {
         }
         rendererPrimitives.push({
             bbox: [minX, minY, maxX, maxY],
-            addr: primaryAddr
+            addr: primaryAddr,
+            drawCallIndex: drawCalls,
+            states: {
+                zMode: zm,
+                blendMode: bm,
+                alphaTest: at,
+                texAddr: primaryAddr
+            }
         });
     }
 
@@ -1700,6 +1783,83 @@ function drawPrimitive(cmd) {
     gl.deleteBuffer(colorBuffer);
     gl.deleteBuffer(texCoordBuffer);
 }
+
+// Scrubber and Debug Inspector Logic
+function setupScrubber(count) {
+    const scrubber = document.getElementById('drawCallScrubber');
+    const controls = document.getElementById('debugControls');
+    const valueLabel = document.getElementById('scrubberValue');
+    
+    if (count > 0) {
+        controls.style.display = 'block';
+        scrubber.max = count;
+        scrubber.value = count;
+        valueLabel.innerText = "All";
+        currentDrawCallLimit = -1;
+    } else {
+        controls.style.display = 'none';
+    }
+}
+
+document.getElementById('drawCallScrubber').addEventListener('input', (e) => {
+    const val = parseInt(e.target.value);
+    const max = parseInt(e.target.max);
+    const valueLabel = document.getElementById('scrubberValue');
+    
+    if (val === max) {
+        valueLabel.innerText = "All";
+        currentDrawCallLimit = -1;
+        clearStateInspector();
+    } else {
+        valueLabel.innerText = val;
+        currentDrawCallLimit = val;
+        
+        // Find the primitive at this index and show its state
+        // Corrected: search in rendererPrimitives for the drawCallIndex val
+        const p = rendererPrimitives.find(p => p.drawCallIndex === (val - 1));
+        if (p) updateStateInspector(p);
+    }
+    
+    tryRender();
+});
+
+function updateStateInspector(p) {
+    if (!p || !p.states) return;
+    
+    const zm = p.states.zMode;
+    const at = p.states.alphaTest;
+    const bm = p.states.blendMode;
+    
+    // ZMode Decoding
+    const zEnabled = (zm & 1) ? "ON" : "OFF";
+    const zFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
+    const zFunc = zFuncs[(zm >> 1) & 7];
+    const zWrite = (zm >> 4) & 1 ? "Write" : "Read-Only";
+    document.getElementById('valZMode').innerText = `${zEnabled} (${zFunc}, ${zWrite})`;
+    
+    // Alpha Test Decoding
+    const atFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
+    const atFunc = atFuncs[at & 7];
+    const atRef = ((at >> 8) & 0xFF);
+    document.getElementById('valAlphaTest').innerText = `${atFunc} (Ref: ${atRef})`;
+    
+    // Blend Mode Decoding
+    const bEnabled = (bm & 1) ? "ON" : "OFF";
+    const bFactors = ["ZERO", "ONE", "SRC_CLR", "INV_SRC_CLR", "SRC_ALPHA", "INV_SRC_ALPHA", "DST_ALPHA", "INV_DST_ALPHA"];
+    const bSrc = bFactors[(bm >> 5) & 7];
+    const bDst = bFactors[(bm >> 2) & 7];
+    document.getElementById('valBlend').innerText = `${bEnabled} (${bSrc} / ${bDst})`;
+    
+    document.getElementById('valTexture').innerText = `0x${p.states.texAddr || 'None'}`;
+}
+
+function clearStateInspector() {
+    document.getElementById('valZMode').innerText = "-";
+    document.getElementById('valAlphaTest').innerText = "-";
+    document.getElementById('valBlend').innerText = "-";
+    document.getElementById('valTexture').innerText = "-";
+}
+
 
 // Auto-load data if running from the run_viewer.sh script
 window.addEventListener('DOMContentLoaded', () => {
@@ -1723,6 +1883,16 @@ window.addEventListener('DOMContentLoaded', () => {
             memData = data;
             document.getElementById('memLabel').innerText = 'HomeMenuFIFO_Frame1.mem (Auto-loaded)';
             statusPanel.innerText = 'Auto-loaded fresh extracted files from dolphin-tool successfully!';
+            
+            // Initialize Scrubber for auto-loaded data
+            let totalDC = 0;
+            if (jsonData && jsonData[0] && jsonData[0].commands) {
+                for (const cmd of jsonData[0].commands) {
+                    if (cmd.type === "Primitive") totalDC++;
+                }
+            }
+            maxDrawCalls = totalDC;
+            setupScrubber(totalDC);
             
             // Short delay so the user sees the success message before rendering overwrites it
             setTimeout(tryRender, 500);

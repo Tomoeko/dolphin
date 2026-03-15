@@ -299,6 +299,48 @@ body, html {
     -webkit-user-select: none;
 }
 
+/* Debugging Tools */
+.scrubber-container {
+    margin-top: 10px;
+}
+
+.scrubber-container label {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+
+#drawCallScrubber {
+    width: 100%;
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.state-inspector {
+    margin-top: 15px;
+    background: var(--bg-darker);
+    border-radius: 8px;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.state-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.state-row span:first-child {
+    color: var(--text-dim);
+}
+
+.state-row span:last-child {
+    color: var(--accent-color);
+}
+
 img {
     -webkit-user-drag: none;
 }
