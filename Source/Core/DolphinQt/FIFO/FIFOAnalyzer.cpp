@@ -2192,16 +2192,23 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
   const std::filesystem::path tex_folder = export_dir / "textures";
   std::filesystem::create_directories(tex_folder);
 
-  const auto* const file = m_fifo_player.GetFile();
-  const u32 frame_count = file->GetFrameCount();
-
+  // Track exported textures to avoid duplicates
   std::set<u32> exported_tex_addrs;
+  // Map tex_addr -> exported filename for scene.json references
   std::map<u32, std::string> tex_addr_to_filename;
-  u32 total_objects = 0;
   u32 tex_export_count = 0;
 
+  const auto* const file = m_fifo_player.GetFile();
+  const u32 frame_count = file->GetFrameCount();
+  u32 total_objects = 0;
+
+  // We'll build the JSON manually (no JSON library dependency)
   std::ostringstream json;
-  json << "{\n  \"exportVersion\": 2,\n";
+  json << "{\n";
+  json << "  \"exportVersion\": 1,\n";
+
+  // HTML will be written after JSON is complete (we embed the JSON data inline)
+  std::ostringstream html;
   json << "  \"frameCount\": " << frame_count << ",\n";
   json << "  \"frames\": [\n";
 
@@ -2211,12 +2218,16 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
     const auto& fifo_frame = file->GetFrame(frame);
 
     if (frame > 0) json << ",\n";
-    json << "    {\n      \"frameIndex\": " << frame << ",\n      \"objects\": [\n";
+    json << "    {\n";
+    json << "      \"frameIndex\": " << frame << ",\n";
+    json << "      \"objects\": [\n";
 
     u32 part_start = 0;
     u32 object_idx = 0;
     bool first_obj = true;
 
+    // Reset viewport/projection tracking at frame start so state
+    // commands within this frame can set them properly.
     auto summary_cb_global = SummaryCallback(frame_info.parts.empty() ?
         CPState{} : frame_info.parts[0].m_cpmem, fifo_frame);
     summary_cb_global.ResetGlobalState();
@@ -2224,24 +2235,29 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
     for (u32 part_nr = 0; part_nr < frame_info.parts.size(); part_nr++)
     {
       const auto& part = frame_info.parts[part_nr];
-      if (part.m_type != FramePartType::PrimitiveData && part.m_type != FramePartType::EFBCopy)
+      bool is_boundary = (part.m_type == FramePartType::PrimitiveData ||
+                          part.m_type == FramePartType::EFBCopy);
+      if (!is_boundary)
         continue;
 
       const u32 start_part = part_start;
+      const u32 end_part = part_nr;
       part_start = part_nr + 1;
 
       if (part.m_type != FramePartType::PrimitiveData)
       {
         object_idx++;
-        continue;
+        continue;  // Skip EFB copies
       }
 
       const u32 obj_start = frame_info.parts[start_part].m_start;
-      const u32 obj_end = frame_info.parts[part_nr].m_end;
+      const u32 obj_end = frame_info.parts[end_part].m_end;
       const u32 obj_size = obj_end - obj_start;
 
-      auto summary_cb = SummaryCallback(frame_info.parts[part_nr].m_cpmem, fifo_frame);
+      // Parse object state
+      auto summary_cb = SummaryCallback(frame_info.parts[end_part].m_cpmem, fifo_frame);
       summary_cb.Reset();
+      // Inherit global viewport/projection state
       summary_cb.m_vp_set = summary_cb_global.m_vp_set;
       summary_cb.m_vp_wd = summary_cb_global.m_vp_wd;
       summary_cb.m_vp_ht = summary_cb_global.m_vp_ht;
@@ -2250,7 +2266,6 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
       summary_cb.m_proj_set = summary_cb_global.m_proj_set;
       summary_cb.m_proj_type = summary_cb_global.m_proj_type;
       for (int i = 0; i < 6; i++) summary_cb.m_proj_params[i] = summary_cb_global.m_proj_params[i];
-
       {
         u32 soff = 0;
         while (soff < obj_size)
@@ -2260,7 +2275,7 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
               obj_size - soff, summary_cb);
         }
       }
-
+      // Update global viewport/projection state if this object changed them
       if (summary_cb.m_vp_set)
       {
         summary_cb_global.m_vp_set = true;
@@ -2277,288 +2292,805 @@ void FIFOAnalyzer::ExportSceneTo(const QString& dir, bool headless)
           summary_cb_global.m_proj_params[i] = summary_cb.m_proj_params[i];
       }
 
-      // Export unique textures
+      // Export textures for this object
       for (int i = 0; i < 8; i++)
       {
-        if (!summary_cb.m_tex_set[i] || exported_tex_addrs.count(summary_cb.m_tex_addr[i]))
+        if (!summary_cb.m_tex_set[i])
+          continue;
+        if (exported_tex_addrs.count(summary_cb.m_tex_addr[i]))
           continue;
 
         const u32 tex_addr = summary_cb.m_tex_addr[i];
         const u32 tex_w = summary_cb.m_tex_width[i];
         const u32 tex_h = summary_cb.m_tex_height[i];
-        const TextureFormat tex_fmt = static_cast<TextureFormat>(summary_cb.m_tex_fmt[i]);
+        const u32 tex_fmt_raw = summary_cb.m_tex_fmt[i];
 
-        if (tex_w == 0 || tex_h == 0 || tex_w > 2048 || tex_h > 2048 || static_cast<u32>(tex_fmt) > 14 || IsColorIndexed(tex_fmt))
+        if (tex_w == 0 || tex_h == 0 || tex_w > 2048 || tex_h > 2048)
+          continue;
+        if (tex_fmt_raw > 14)
           continue;
 
-        const u32 expanded_w = Common::AlignUp(tex_w, TexDecoder_GetBlockWidthInTexels(tex_fmt));
-        const u32 expanded_h = Common::AlignUp(tex_h, TexDecoder_GetBlockHeightInTexels(tex_fmt));
+        const TextureFormat tex_fmt = static_cast<TextureFormat>(tex_fmt_raw);
+        if (IsColorIndexed(tex_fmt))
+          continue;
+
+        const u32 block_w = TexDecoder_GetBlockWidthInTexels(tex_fmt);
+        const u32 block_h = TexDecoder_GetBlockHeightInTexels(tex_fmt);
+        if (block_w == 0 || block_h == 0)
+          continue;
+
+        const u32 expanded_w = Common::AlignUp(tex_w, block_w);
+        const u32 expanded_h = Common::AlignUp(tex_h, block_h);
         const u32 tex_data_size = TexDecoder_GetTextureSizeInBytes(expanded_w, expanded_h, tex_fmt);
+        if (tex_data_size == 0)
+          continue;
 
         const u8* tex_data = nullptr;
         for (const auto& mem_update : fifo_frame.memoryUpdates)
         {
-          if (mem_update.type == MemoryUpdate::Type::TextureMap && !mem_update.data.empty() &&
-              tex_addr >= mem_update.address && tex_addr + tex_data_size <= mem_update.address + mem_update.data.size())
-          {
-            tex_data = &mem_update.data[tex_addr - mem_update.address];
-            break;
-          }
+          if (mem_update.type != MemoryUpdate::Type::TextureMap)
+            continue;
+          if (mem_update.data.empty())
+            continue;
+          if (tex_addr < mem_update.address)
+            continue;
+          const u32 offset_in_update = tex_addr - mem_update.address;
+          if (offset_in_update + tex_data_size > static_cast<u32>(mem_update.data.size()))
+            continue;
+          tex_data = &mem_update.data[offset_in_update];
+          break;
         }
 
-        if (tex_data)
+        if (!tex_data)
+          continue;
+
+        // Find TLUT if paletted
+        const u8* tlut_data = nullptr;
+        TLUTFormat tlut_fmt = TLUTFormat::IA8;
+        if (tex_fmt == TextureFormat::C4 || tex_fmt == TextureFormat::C8 || tex_fmt == TextureFormat::C14X2)
         {
-          const u8* tlut_data = nullptr;
-          TLUTFormat tlut_fmt = TLUTFormat::IA8;
-          if (tex_fmt == TextureFormat::C4 || tex_fmt == TextureFormat::C8 || tex_fmt == TextureFormat::C14X2)
-          {
-            u32 tmem_addr = summary_cb.m_tex_tlut_tmem[i];
-            tlut_fmt = summary_cb.m_tex_tlut_fmt[i];
-            auto it = summary_cb.m_tlut_bank.find(tmem_addr);
-            if (it != summary_cb.m_tlut_bank.end()) tlut_data = it->second.data();
-          }
-
-          std::vector<u8> decoded(expanded_w * expanded_h * 4);
-          TexDecoder_Decode(decoded.data(), tex_data, expanded_w, expanded_h, tex_fmt, tlut_data, tlut_fmt);
-
-          std::string tex_name = g_texture_cache ? g_texture_cache->GetTextureNameByAddress(tex_addr) : "";
-          if (tex_name.empty()) tex_name = fmt::format("tex_0x{:08X}", tex_addr);
-
-          const std::string filename = tex_name + ".png";
-          Common::SavePNG((tex_folder / filename).string(), decoded.data(), Common::ImageByteFormat::RGBA, tex_w, tex_h, expanded_w * 4);
-          exported_tex_addrs.insert(tex_addr);
-          tex_addr_to_filename[tex_addr] = filename;
-          tex_export_count++;
+          u32 tmem_addr = summary_cb.m_tex_tlut_tmem[i];
+          tlut_fmt = summary_cb.m_tex_tlut_fmt[i];
+          auto it = summary_cb.m_tlut_bank.find(tmem_addr);
+          if (it != summary_cb.m_tlut_bank.end())
+            tlut_data = it->second.data();
         }
+
+        const u32 stride = expanded_w * 4;
+        std::vector<u8> decoded(stride * expanded_h);
+        TexDecoder_Decode(decoded.data(), tex_data, expanded_w, expanded_h, tex_fmt, tlut_data,
+                          tlut_fmt);
+
+        // Build filename
+        std::string tex_name;
+        if (g_texture_cache)
+          tex_name = g_texture_cache->GetTextureNameByAddress(tex_addr);
+        if (tex_name.empty())
+          tex_name = fmt::format("tex_0x{:08X}_{}x{}", tex_addr, tex_w, tex_h);
+
+        const std::string filename = tex_name + ".png";
+        const std::filesystem::path tex_path = tex_folder / filename;
+        Common::SavePNG(tex_path.string(), decoded.data(), Common::ImageByteFormat::RGBA,
+                        tex_w, tex_h, stride);
+        exported_tex_addrs.insert(tex_addr);
+        tex_addr_to_filename[tex_addr] = filename;
+        tex_export_count++;
       }
 
-      // Collect screen-space geometry
-      struct ScreenVert { float sx, sy, u, v, r, g, b, a; };
-      std::vector<ScreenVert> tri_verts;
+      // Compute screen-space quad vertices using full GX pipeline:
+      // 1. Model-view: mv = posMatrix * vertex
+      // 2. Projection (ortho): clip_x = mv_x * proj[0] + proj[1]
+      //                        clip_y = mv_y * proj[2] + proj[3]
+      // 3. Viewport: screen_x = clip_x * vp_wd + vp_xOrig
+      //              screen_y = clip_y * vp_ht + vp_yOrig
 
-      auto transform_v = [&](const SummaryCallback::VertexInfo& v) -> ScreenVert {
-        const float* m = &summary_cb.m_pos_matrices[(v.pos_idx & 0x3f) * 4];
-        float mv_x = m[0]*v.px + m[1]*v.py + m[2]*v.pz + m[3];
-        float mv_y = m[4]*v.px + m[5]*v.py + m[6]*v.pz + m[7];
+      // Collect screen-space quad vertices (up to 4) with their UVs.
+      // These are the actual corners of the rendered quad after the full
+      // GX pipeline.
+      struct ScreenVert {
+        float sx, sy;
+        float uvs[8][2];
+        float r, g, b, a;
+      };
+      std::vector<ScreenVert> triangles;
+
+      // Helper: apply full GX pipeline to a vertex position
+      // Step 1: Full 3x4 model-view matrix multiply (handles rotation/skew/mirror)
+      // Step 2: Orthographic projection
+      // Step 3: Viewport transform
+      auto transform_vert = [&](float px, float py, float pz, u32 pos_idx) -> std::pair<float, float> {
+        const float* m = &summary_cb.m_pos_matrices[(pos_idx & 0x3f) * 4];
+        float mv_x = m[0]*px + m[1]*py + m[2]*pz + m[3];
+        float mv_y = m[4]*px + m[5]*py + m[6]*pz + m[7];
         float clip_x = mv_x, clip_y = mv_y;
-        if (summary_cb.m_proj_set && summary_cb.m_proj_type == 1) {
+        if (summary_cb.m_proj_set && summary_cb.m_proj_type == 1) // orthographic
+        {
           clip_x = mv_x * summary_cb.m_proj_params[0] + summary_cb.m_proj_params[1];
           clip_y = mv_y * summary_cb.m_proj_params[2] + summary_cb.m_proj_params[3];
         }
-        ScreenVert sv;
-        sv.sx = clip_x * summary_cb.m_vp_wd + summary_cb.m_vp_x_orig;
-        sv.sy = clip_y * summary_cb.m_vp_ht + summary_cb.m_vp_y_orig;
-        sv.u = v.has_uv_set[0] ? v.uvs[0][0] : 0; sv.v = v.has_uv_set[0] ? v.uvs[0][1] : 0;
-        sv.r = v.has_color ? v.cr/255.0f : 1.0f; sv.g = v.has_color ? v.cg/255.0f : 1.0f;
-        sv.b = v.has_color ? v.cb/255.0f : 1.0f; sv.a = v.has_color ? v.ca/255.0f : 1.0f;
-        return sv;
+        else if (summary_cb.m_proj_set && summary_cb.m_proj_type == 0) // perspective
+        {
+          float mv_z = m[8]*px + m[9]*py + m[10]*pz + m[11];
+          clip_x = (mv_x * summary_cb.m_proj_params[0] + mv_z * summary_cb.m_proj_params[1]) / -mv_z;
+          clip_y = (mv_y * summary_cb.m_proj_params[2] + mv_z * summary_cb.m_proj_params[3]) / -mv_z;
+        }
+        float sx = clip_x * summary_cb.m_vp_wd + summary_cb.m_vp_x_orig;
+        float sy = clip_y * summary_cb.m_vp_ht + summary_cb.m_vp_y_orig;
+        return {sx, sy};
       };
 
+      // Transform vertices to screen-space and collect quad corners
       for (const auto& pg : summary_cb.m_primitives)
       {
-        std::vector<ScreenVert> svs;
-        for (const auto& v : pg.vertices) if(v.has_pos) svs.push_back(transform_v(v));
-        
-        if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_QUADS) {
-          for (size_t i = 0; i + 3 < svs.size(); i += 4) {
-            tri_verts.insert(tri_verts.end(), {svs[i], svs[i+1], svs[i+2], svs[i], svs[i+2], svs[i+3]});
+        std::vector<ScreenVert> pg_verts;
+        for (const auto& v : pg.vertices)
+        {
+          if (!v.has_pos) continue;
+          auto [sx, sy] = transform_vert(v.px, v.py, v.pz, v.pos_idx);
+          float r = v.has_color ? (v.cr / 255.0f) : 1.0f;
+          float g = v.has_color ? (v.cg / 255.0f) : 1.0f;
+          float b = v.has_color ? (v.cb / 255.0f) : 1.0f;
+          float a = v.has_color ? (v.ca / 255.0f) : 1.0f;
+          ScreenVert sv;
+          sv.sx = sx; sv.sy = sy;
+          for (int t = 0; t < 8; t++) {
+            sv.uvs[t][0] = v.has_uv_set[t] ? v.uvs[t][0] : 0.0f;
+            sv.uvs[t][1] = v.has_uv_set[t] ? v.uvs[t][1] : 0.0f;
           }
-        } else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLES) {
-          for (size_t i = 0; i + 2 < svs.size(); i += 3) {
-            tri_verts.insert(tri_verts.end(), {svs[i], svs[i+1], svs[i+2]});
+          sv.r = r; sv.g = g; sv.b = b; sv.a = a;
+          pg_verts.push_back(sv);
+        }
+
+        // Triangulate based on primitive type
+        if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_QUADS)
+        {
+          for (size_t i = 0; i + 3 < pg_verts.size(); i += 4)
+          {
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
+            triangles.push_back(pg_verts[i + 2]);
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 2]);
+            triangles.push_back(pg_verts[i + 3]);
           }
-        } else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_STRIP) {
-          for (size_t i = 0; i + 2 < svs.size(); i++) {
-            if (i % 2 == 0) tri_verts.insert(tri_verts.end(), {svs[i], svs[i+1], svs[i+2]});
-            else tri_verts.insert(tri_verts.end(), {svs[i], svs[i+2], svs[i+1]});
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLES)
+        {
+          for (size_t i = 0; i + 2 < pg_verts.size(); i += 3)
+          {
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
+            triangles.push_back(pg_verts[i + 2]);
+          }
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_STRIP)
+        {
+          for (size_t i = 0; i + 2 < pg_verts.size(); i++)
+          {
+            triangles.push_back(pg_verts[i]);
+            if (i % 2 == 0)
+            {
+              triangles.push_back(pg_verts[i + 1]);
+              triangles.push_back(pg_verts[i + 2]);
+            }
+            else
+            {
+              triangles.push_back(pg_verts[i + 2]);
+              triangles.push_back(pg_verts[i + 1]);
+            }
+          }
+        }
+        else if (pg.type == OpcodeDecoder::Primitive::GX_DRAW_TRIANGLE_FAN)
+        {
+          for (size_t i = 1; i + 1 < pg_verts.size(); i++)
+          {
+            triangles.push_back(pg_verts[0]);
+            triangles.push_back(pg_verts[i]);
+            triangles.push_back(pg_verts[i + 1]);
           }
         }
       }
 
-      if (tri_verts.empty()) { object_idx++; continue; }
+      // Decode TEV registers for this object
+      auto decode_reg = [](u32 ra, u32 bg, int& r, int& g, int& b, int& a) {
+        r = std::clamp(int(ra & 0x7FF), 0, 255);
+        a = std::clamp(int((ra >> 12) & 0x7FF), 0, 255);
+        b = std::clamp(int(bg & 0x7FF), 0, 255);
+        g = std::clamp(int((bg >> 12) & 0x7FF), 0, 255);
+      };
 
+      // Write JSON object
       if (!first_obj) json << ",\n";
       first_obj = false;
+
       json << "        {\n";
-      json << "          \"id\": " << object_idx << ",\n";
-      json << "          \"verts\": [";
-      for (size_t i = 0; i < tri_verts.size(); i++) {
-        const auto& v = tri_verts[i];
-        json << fmt::format("[{:.1f},{:.1f},{:.4f},{:.4f},{:.2f},{:.2f},{:.2f},{:.2f}]", v.sx, v.sy, v.u, v.v, v.r, v.g, v.b, v.a);
-        if (i + 1 < tri_verts.size()) json << ",";
-      }
-      json << "],\n";
+      json << "          \"objectIndex\": " << object_idx << ",\n";
 
+      // (screenX/Y/W/H and uvTL/BR removed — raw data is in quad[] and vertices[])
+
+      // Screen-space triangles — final pixel positions + UVs + vertex colors.
+      if (triangles.size() > 0)
+      {
+        json << "          \"triangles\": [\n";
+        for (size_t qi = 0; qi < triangles.size(); qi++)
+        {
+          const auto& qv = triangles[qi];
+          json << fmt::format("            {{\"sx\": {:.2f}, \"sy\": {:.2f}, \"uvs\": [", qv.sx, qv.sy);
+          for (int t = 0; t < 8; t++) {
+            if (t > 0) json << ", ";
+            json << fmt::format("[{:.6f}, {:.6f}]", qv.uvs[t][0], qv.uvs[t][1]);
+          }
+          json << fmt::format("], \"r\": {:.6f}, \"g\": {:.6f}, \"b\": {:.6f}, \"a\": {:.6f}}}",
+                              qv.r, qv.g, qv.b, qv.a);
+          if (qi + 1 < triangles.size()) json << ",";
+          json << "\n";
+        }
+        json << "          ],\n";
+      }
+
+      // (translateX/Y/Z, scaleX/Y removed — full matrix is in posMatrix via quad[])
+
+      // Textures
       json << "          \"textures\": [";
-      for (int i = 0, first_t = 1; i < 8; i++) {
+      bool first_tex = true;
+      for (int i = 0; i < 8; i++)
+      {
         if (!summary_cb.m_tex_set[i]) continue;
-        if (!first_t) json << ","; first_t = 0;
-        json << fmt::format("{{\"u\":{},\"f\":\"{}\",\"w\":{},\"h\":{}}}", i, tex_addr_to_filename[summary_cb.m_tex_addr[i]], summary_cb.m_tex_width[i], summary_cb.m_tex_height[i]);
+        if (!first_tex) json << ", ";
+        first_tex = false;
+
+        // Find the exported filename for this texture
+        auto it = tex_addr_to_filename.find(summary_cb.m_tex_addr[i]);
+        std::string fname = (it != tex_addr_to_filename.end()) ? it->second :
+            fmt::format("tex_0x{:08X}_{}x{}.png", summary_cb.m_tex_addr[i],
+                        summary_cb.m_tex_width[i], summary_cb.m_tex_height[i]);
+        // Include wrap modes if available (0=Clamp, 1=Repeat, 2=Mirror)
+        int wrapS = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_s[i] : 0;
+        int wrapT = summary_cb.m_tex_wrap_set[i] ? summary_cb.m_tex_wrap_t[i] : 0;
+        json << fmt::format("{{\"unit\": {}, \"file\": \"{}\", \"width\": {}, \"height\": {}, "
+                             "\"fmt\": {}, \"addr\": \"0x{:08X}\", \"wrapS\": {}, \"wrapT\": {}}}",
+                             i, fname, summary_cb.m_tex_width[i], summary_cb.m_tex_height[i],
+                             summary_cb.m_tex_fmt[i], summary_cb.m_tex_addr[i], wrapS, wrapT);
       }
       json << "],\n";
 
-      if (summary_cb.m_blend_set) {
-        BlendMode bm; bm.hex = summary_cb.m_blend_val;
-        json << fmt::format("          \"blend\": {{\"src\":{},\"dst\":{},\"en\":{}}},\n", static_cast<u32>(bm.src_factor.Value()), static_cast<u32>(bm.dst_factor.Value()), bm.blend_enable);
+      // TEV color registers (c0-c3, the "color" bank)
+      json << "          \"tevColorRegs\": {";
+      {
+        bool first_reg = true;
+        for (int i = 0; i < 4; i++)
+        {
+          if (!summary_cb.m_tev_color_set[i]) continue;
+          if (!first_reg) json << ", ";
+          first_reg = false;
+          int r, g, b, a;
+          decode_reg(summary_cb.m_tev_color_ra[i], summary_cb.m_tev_color_bg[i], r, g, b, a);
+          json << fmt::format("\"c{}\": [{}, {}, {}, {}]", i, r, g, b, a);
+        }
       }
-      
-      json << "          \"stages\": " << summary_cb.m_num_tev_stages << "\n";
+      json << "},\n";
+
+      // TEV konst registers (k0-k3, the "konst" bank)
+      json << "          \"tevKonstRegs\": {";
+      {
+        bool first_reg = true;
+        for (int i = 0; i < 4; i++)
+        {
+          if (!summary_cb.m_tev_konst_set[i]) continue;
+          if (!first_reg) json << ", ";
+          first_reg = false;
+          int r, g, b, a;
+          decode_reg(summary_cb.m_tev_konst_ra[i], summary_cb.m_tev_konst_bg[i], r, g, b, a);
+          json << fmt::format("\"k{}\": [{}, {}, {}, {}]", i, r, g, b, a);
+        }
+      }
+      json << "},\n";
+
+      // TEV stages
+      json << fmt::format("          \"tevStages\": {},\n", summary_cb.m_num_tev_stages);
+
+      // Channel 0 alpha source: 0=Register, 1=Vertex
+      // When vertex alpha is the source and all vertex alpha=0, TEV stages that
+      // multiply by raster alpha will produce zero alpha → fully transparent.
+      if (summary_cb.m_chan0_alpha_src >= 0)
+      {
+        json << fmt::format("          \"chan0AlphaSrc\": {},\n", summary_cb.m_chan0_alpha_src);
+      }
+
+      // TEV alpha combiner inputs per stage: [a, b, c, d] indices
+      // Alpha input names: 0=prev, 1=c0, 2=c1, 3=c2, 4=tex, 5=ras, 6=konst, 7=zero
+      // The compositor uses this to detect patterns like "prev * ras" (vertex modulation).
+      {
+        json << "          \"tevAlphaOps\": [";
+        bool first_stage = true;
+        for (u32 s = 0; s < summary_cb.m_num_tev_stages && s < 16; s++)
+        {
+          if (!summary_cb.m_tev_env_set[s]) continue;
+          TevStageCombiner::AlphaCombiner ac;
+          ac.hex = summary_cb.m_tev_alpha_env[s];
+          if (!first_stage) json << ", ";
+          first_stage = false;
+          json << fmt::format("[{}, {}, {}, {}]",
+                              static_cast<u32>(ac.a.Value()),
+                              static_cast<u32>(ac.b.Value()),
+                              static_cast<u32>(ac.c.Value()),
+                              static_cast<u32>(ac.d.Value()));
+        }
+        json << "],\n";
+      }
+
+      // TEV color combiner inputs per stage: [a, b, c, d] indices
+      // Color input names: 0=prev, 1=prev_alpha, 2=c0, 3=c0_alpha,
+      //   4=c1, 5=c1_alpha, 6=c2, 7=c2_alpha, 8=tex, 9=tex_alpha,
+      //   10=ras, 11=ras_alpha, 12=ONE(8/8th), 13=HALF(4/8th), 14=konst, 15=ZERO
+      {
+        json << "          \"tevColorOps\": [";
+        bool first_stage = true;
+        for (u32 s = 0; s < summary_cb.m_num_tev_stages && s < 16; s++)
+        {
+          if (!summary_cb.m_tev_env_set[s]) continue;
+          TevStageCombiner::ColorCombiner cc;
+          cc.hex = summary_cb.m_tev_color_env[s];
+          if (!first_stage) json << ", ";
+          first_stage = false;
+          json << fmt::format("[{}, {}, {}, {}]",
+                              static_cast<u32>(cc.a.Value()),
+                              static_cast<u32>(cc.b.Value()),
+                              static_cast<u32>(cc.c.Value()),
+                              static_cast<u32>(cc.d.Value()));
+        }
+        json << "],\n";
+      }
+
+      // Konst color and alpha selection per TEV stage
+      // kcsel: which konst register feeds into the color "konst" input (14)
+      // kasel: which konst register feeds into the alpha "konst" input (6)
+      // Values are KonstSel enum indices (see BPMemory.h)
+      {
+        json << "          \"tevKonstSel\": [";
+        bool first_stage = true;
+        for (u32 s = 0; s < summary_cb.m_num_tev_stages && s < 16; s++)
+        {
+          if (!summary_cb.m_tev_env_set[s]) continue;
+          int ksel_idx = s >> 1;
+          u32 kcsel_val = 0, kasel_val = 0;
+          if (summary_cb.m_ksel_set[ksel_idx])
+          {
+            TevKSel ksel; ksel.hex = summary_cb.m_ksel[ksel_idx];
+            kcsel_val = static_cast<u32>((s & 1) ?
+                ksel.kcsel_odd.Value() : ksel.kcsel_even.Value());
+            kasel_val = static_cast<u32>((s & 1) ?
+                ksel.kasel_odd.Value() : ksel.kasel_even.Value());
+          }
+          if (!first_stage) json << ", ";
+          first_stage = false;
+          json << fmt::format("[{}, {}]", kcsel_val, kasel_val);
+        }
+        json << "],\n";
+      }
+
+      // TREF: per-stage texture map index, texture coord index, enable flag,
+      // and raster color channel binding
+      // rasChannel: 0=Color0A0, 1=Color1A1, 5=AlphaBump, 7=Zero(disabled)
+      if (summary_cb.m_tref_set)
+      {
+        json << "          \"tevTref\": [";
+        bool first_stage = true;
+        for (u32 s = 0; s < summary_cb.m_num_tev_stages && s < 16; s++)
+        {
+          if (!summary_cb.m_tev_env_set[s]) continue;
+          int tref_idx = s / 2;
+          int tref_sub = s % 2;
+          u32 texmap = 0, texcoord = 0, ras_chan = 7;
+          bool enable = false;
+          if (tref_idx < 8)
+          {
+            TwoTevStageOrders tref; tref.hex = summary_cb.m_tref[tref_idx];
+            texmap = tref.getTexMap(tref_sub);
+            texcoord = tref.getTexCoord(tref_sub);
+            enable = tref.getEnable(tref_sub);
+            ras_chan = static_cast<u32>(tref.getColorChan(tref_sub));
+          }
+          if (!first_stage) json << ", ";
+          first_stage = false;
+          json << fmt::format("{{\"texMap\": {}, \"texCoord\": {}, \"texEnable\": {}, \"rasChannel\": {}}}",
+                              texmap, texcoord, enable ? "true" : "false", ras_chan);
+        }
+        json << "],\n";
+      }
+
+      // Channel 0 color source: 0=Register, 1=Vertex
+      if (summary_cb.m_chan0_color_src >= 0)
+      {
+        json << fmt::format("          \"chan0ColorSrc\": {},\n", summary_cb.m_chan0_color_src);
+      }
+
+      // Scissor rectangle (screen-space clip region)
+      // GX scissor register values are in the same coordinate space as the
+      // viewport-transformed quad positions (both include the GX hardware
+      // EFB bias). Verified: scissor raw values match quad sx/sy within 2px
+      // for all channel texture objects.
+      // BR values use +1 because the scissor range is inclusive.
+      if (summary_cb.m_scissor_set)
+      {
+        ScissorPos stl; stl.hex = summary_cb.m_scissor_tl;
+        ScissorPos sbr; sbr.hex = summary_cb.m_scissor_br;
+        float sx0 = static_cast<float>(stl.x.Value());
+        float sy0 = static_cast<float>(stl.y.Value());
+        float sx1 = static_cast<float>(sbr.x.Value()) + 1.0f;
+        float sy1 = static_cast<float>(sbr.y.Value()) + 1.0f;
+        json << fmt::format("          \"scissor\": {{\"x0\": {:.1f}, \"y0\": {:.1f}, \"x1\": {:.1f}, \"y1\": {:.1f}}},\n",
+                            sx0, sy0, sx1, sy1);
+      }
+
+      // Blend mode
+      if (summary_cb.m_blend_set)
+      {
+        BlendMode bm;
+        bm.hex = summary_cb.m_blend_val;
+        json << fmt::format("          \"blendSrc\": {},\n", static_cast<u32>(bm.src_factor.Value()));
+        json << fmt::format("          \"blendDst\": {},\n", static_cast<u32>(bm.dst_factor.Value()));
+        json << fmt::format("          \"blendEnable\": {},\n", bm.blend_enable ? "true" : "false");
+      }
+
+      // Vertex data (positions + colors for each vertex) handled in triangles array.
+
+      // Draw order
+      json << "          \"drawOrder\": " << object_idx << "\n";
       json << "        }";
+
+      // (HTML generation moved to post-JSON canvas renderer)
 
       object_idx++;
       total_objects++;
     }
 
-    json << "\n      ]\n    }";
+    json << "\n      ]\n";
+    json << "    }";
   }
 
-  json << "\n  ]\n}\n";
+  json << "\n  ]\n";
+  json << "}\n";
 
+  // Write scene.json
   const std::filesystem::path json_path = export_dir / "scene.json";
-  std::ofstream(json_path.string()) << json.str();
+  std::ofstream json_file(json_path.string());
+  if (json_file.is_open())
+  {
+    json_file << json.str();
+    json_file.close();
+  }
 
-  std::ostringstream html;
-  html << R"HTML(<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Dolphin FIFO Scene Export</title>
-    <style>
-        :root { --bg: #0f172a; --panel: rgba(30, 41, 59, 0.7); --accent: #38bdf8; --text: #f1f5f9; }
-        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; height: 100vh; display: flex; overflow: hidden; }
-        #sidebar { width: 320px; background: var(--panel); backdrop-filter: blur(16px); border-right: 1px solid rgba(255,255,255,0.1); display: flex; flex-direction: column; z-index: 10; }
-        #viewer { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%); overflow: auto; }
-        .header { padding: 24px; font-weight: 800; font-size: 1.4rem; border-bottom: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.02); }
-        #object-list { flex: 1; overflow-y: auto; padding: 16px; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent; }
-        .obj-item { padding: 12px; margin-bottom: 10px; background: rgba(255,255,255,0.03); border-radius: 12px; cursor: pointer; transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); border: 1px solid rgba(255,255,255,0.05); }
-        .obj-item:hover { background: rgba(56, 189, 248, 0.08); border-color: rgba(56, 189, 248, 0.4); transform: translateY(-1px); }
-        .obj-item.active { background: rgba(56, 189, 248, 0.15); border-color: var(--accent); box-shadow: 0 4px 20px rgba(56, 189, 248, 0.2); }
-        canvas { max-width: 95%; max-height: 95%; box-shadow: 0 30px 60px rgba(0,0,0,0.6); image-rendering: pixelated; border-radius: 4px; background: #000; }
-        #info { padding: 24px; background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(8px); border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.9rem; position: relative; }
-        .badge { background: var(--accent); color: #0f172a; padding: 3px 8px; border-radius: 6px; font-weight: 800; font-size: 0.7rem; margin-right: 8px; vertical-align: middle; text-transform: uppercase; }
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
-        .stat-box { background: rgba(255,255,255,0.03); padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); }
-        .stat-label { font-size: 0.7rem; color: rgba(255,255,255,0.5); text-transform: uppercase; }
-        .stat-val { font-weight: 600; font-family: monospace; }
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-    </style>
-</head>
-<body>
-    <div id="sidebar">
-        <div class="header">Dolphin <span style="color:var(--accent)">Scene</span></div>
-        <div id="object-list"></div>
-        <div id="info">
-            <div style="opacity:0.5">Select an object to inspect</div>
-        </div>
-    </div>
-    <div id="viewer">
-        <canvas id="main-canvas"></canvas>
-    </div>
-    <script>
-        const scene = )HTML";
-  html << json.str();
-  html << R"HTML(;
-        const canvas = document.getElementById('main-canvas');
-        const ctx = canvas.getContext('2d', { alpha: false });
-        const objList = document.getElementById('object-list');
-        const info = document.getElementById('info');
-        
-        let frame = scene.frames[0];
-        // Initialize canvas but it will be sized properly after loading
-        canvas.width = 640; canvas.height = 480;
+  // Build WebGL-based HTML with embedded JSON and GX TEV shader
+  const std::string json_data = json.str();
+  html << "<!DOCTYPE html>\n<html>\n<head>\n";
+  html << "<title>Dolphin FIFO Scene Export (WebGL)</title>\n";
+  html << "<style>\n";
+  html << "  body { background: #111; margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; }\n";
+  html << "  #container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }\n";
+  html << "  canvas { image-rendering: pixelated; box-shadow: 0 0 40px rgba(0,0,0,0.8); background: #000; cursor: crosshair; }\n";
+  html << "  #ui { position: absolute; bottom: 20px; left: 20px; color: #fff; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; font-size: 13px; line-height: 1.6; max-width: 300px; backdrop-filter: blur(5px); transition: opacity 0.3s; }\n";
+  html << "  #ui b { color: #0cf; }\n";
+  html << "</style>\n</head>\n<body>\n";
+  html << "<div id=\"container\">\n";
+  html << "  <canvas id=\"scene\" width=\"640\" height=\"480\"></canvas>\n";
+  html << "  <div id=\"ui\">\n";
+  html << "    <b>Wii Frame Export (WebGL)</b><br/>\n";
+  html << "    <span id=\"status\">Initializing renderer...</span><br/>\n";
+  html << "    <small>Coords: <span id=\"coords\">0, 0</span> | Objects: <span id=\"obj-count\">0</span></small>\n";
+  html << "  </div>\n";
+  html << "</div>\n";
+  html << "<script>\n";
+  html << "const SCENE = " << json_data << ";\n";
+  html << R"JS(
+const canvas = document.getElementById('scene');
+const gl = canvas.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+const W = canvas.width, H = canvas.height;
 
-        const images = {};
-        async function loadImages() {
-            const promises = [];
-            const loadedPaths = new Set();
-            frame.objects.forEach(obj => {
-                obj.textures.forEach(tex => {
-                    if (!loadedPaths.has(tex.f)) {
-                        loadedPaths.add(tex.f);
-                        const img = new Image();
-                        img.src = 'textures/' + tex.f;
-                        images[tex.f] = img;
-                        promises.push(new Promise(r => img.onload = r));
-                    }
-                });
-            });
-            await Promise.all(promises);
-            render();
+// WebGL Global State
+let texMap = {};
+
+const VS_SRC = `
+  attribute vec2 a_pos;
+  attribute vec4 a_color;
+  attribute vec2 a_uv0, a_uv1, a_uv2, a_uv3, a_uv4, a_uv5, a_uv6, a_uv7;
+  varying vec4 v_color;
+  varying vec2 v_uvs[8];
+  void main() {
+    // Map hardware 342..982 -> -1..1
+    gl_Position = vec4(((a_pos.x - 342.0) / 320.0) - 1.0, 1.0 - ((a_pos.y - 342.0) / 240.0), 0.0, 1.0);
+    v_color = a_color;
+    v_uvs[0] = a_uv0; v_uvs[1] = a_uv1; v_uvs[2] = a_uv2; v_uvs[3] = a_uv3;
+    v_uvs[4] = a_uv4; v_uvs[5] = a_uv5; v_uvs[6] = a_uv6; v_uvs[7] = a_uv7;
+  }
+`;
+
+const FS_HEADER = `
+  precision mediump float;
+  varying vec4 v_color;
+  varying vec2 v_uvs[8];
+  uniform sampler2D u_tex[8];
+  uniform bool u_texEnabled[16];
+  uniform int u_texIndices[16];
+  uniform int u_uvIndices[16];
+  uniform ivec4 u_colorOps[16];
+  uniform ivec4 u_alphaOps[16];
+  uniform vec4 u_c[3]; 
+  uniform vec4 u_prev_init;
+  uniform vec4 u_k[16];
+  uniform int u_numStages;
+
+  vec3 getColor(int idx, vec4 prev, vec4 c0, vec4 c1, vec4 c2, vec4 tex, vec4 ras, vec4 konst) {
+    if (idx == 0) return prev.rgb;
+    if (idx == 1) return prev.aaa;
+    if (idx == 2) return c0.rgb;
+    if (idx == 3) return c0.aaa;
+    if (idx == 4) return c1.rgb;
+    if (idx == 5) return c1.aaa;
+    if (idx == 6) return c2.rgb;
+    if (idx == 7) return c2.aaa;
+    if (idx == 8) return tex.rgb;
+    if (idx == 9) return tex.aaa;
+    if (idx == 10) return ras.rgb;
+    if (idx == 11) return ras.aaa;
+    if (idx == 12) return vec3(1.0);
+    if (idx == 13) return vec3(0.5);
+    if (idx == 14) return konst.rgb;
+    return vec3(0.0);
+  }
+
+  float getAlpha(int idx, vec4 prev, vec4 c0, vec4 c1, vec4 c2, vec4 tex, vec4 ras, vec4 konst) {
+    if (idx == 0) return prev.a;
+    if (idx == 1) return c0.a;
+    if (idx == 2) return c1.a;
+    if (idx == 3) return c2.a;
+    if (idx == 4) return tex.a;
+    if (idx == 5) return ras.a;
+    if (idx == 6) return konst.a;
+    return 0.0;
+  }
+`;
+
+function buildFS() {
+    let s = FS_HEADER + "void main() {\n  vec4 prev = u_prev_init;\n  vec4 ras = v_color;\n";
+    for(let i=0; i<16; i++) {
+        s += `  if (${i} < u_numStages) {\n`;
+        s += `    vec4 tex = vec4(1.0);\n`;
+        s += `    if (u_texEnabled[${i}]) {\n`;
+        s += `      int texIdx = u_texIndices[${i}];\n`;
+        s += `      int uvIdx = u_uvIndices[${i}];\n`;
+        s += `      vec2 uv = vec2(0.0);\n`;
+        for(let u=0; u<8; u++) s += `      if (uvIdx == ${u}) uv = v_uvs[${u}];\n`;
+        for(let t=0; t<8; t++) s += `      if (texIdx == ${t}) tex = texture2D(u_tex[${t}], uv);\n`;
+        s += `    }\n`;
+        s += `    vec4 konst = u_k[${i}];\n`;
+        s += `    ivec4 cOp = u_colorOps[${i}];\n`;
+        s += `    ivec4 aOp = u_alphaOps[${i}];\n`;
+        s += `    vec3 a = getColor(cOp.x, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 b = getColor(cOp.y, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 c = getColor(cOp.z, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    vec3 d = getColor(cOp.w, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    prev.rgb = clamp(d + mix(a, b, c), 0.0, 1.0);\n`;
+        s += `    float aa = getAlpha(aOp.x, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ab = getAlpha(aOp.y, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ac = getAlpha(aOp.z, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    float ad = getAlpha(aOp.w, prev, u_c[0], u_c[1], u_c[2], tex, ras, konst);\n`;
+        s += `    prev.a = clamp(ad + mix(aa, ab, ac), 0.0, 1.0);\n`;
+        s += `  }\n`;
+    }
+    s += "  if (prev.a < 0.01) discard;\n  gl_FragColor = prev;\n}";
+    return s;
+}
+
+const FS_SRC = buildFS();
+
+function createShader(gl, type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s));
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, VS_SRC));
+gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, FS_SRC));
+gl.linkProgram(program);
+gl.useProgram(program);
+
+const aPos = gl.getAttribLocation(program, "a_pos");
+const aColor = gl.getAttribLocation(program, "a_color");
+const aUv = [];
+for (let i = 0; i < 8; i++) {
+    aUv[i] = gl.getAttribLocation(program, `a_uv${i}`);
+}
+
+const uNumStages = gl.getUniformLocation(program, "u_numStages");
+const uC = gl.getUniformLocation(program, "u_c[0]");
+const uPrevInit = gl.getUniformLocation(program, "u_prev_init");
+const uK = gl.getUniformLocation(program, "u_k[0]");
+const uTex = [];
+for (let i = 0; i < 8; i++) {
+    uTex[i] = gl.getUniformLocation(program, `u_tex[${i}]`);
+}
+const uTexEnabled = gl.getUniformLocation(program, "u_texEnabled[0]");
+const uTexIndices = gl.getUniformLocation(program, "u_texIndices[0]");
+const uUvIndices = gl.getUniformLocation(program, "u_uvIndices[0]");
+const uColorOps = gl.getUniformLocation(program, "u_colorOps[0]");
+const uAlphaOps = gl.getUniformLocation(program, "u_alphaOps[0]");
+
+
+// Load Textures
+async function loadTextures(objects) {
+  const promises = [];
+  const statusLabels = document.getElementById('status');
+  for (const obj of objects) {
+    for (const tex of (obj.textures || [])) {
+      if (texMap[tex.file]) continue;
+      const p = new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => {
+          const t = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, t);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+          gl.generateMipmap(gl.TEXTURE_2D);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, tex.wrapS === 1 ? gl.REPEAT : (tex.wrapS === 2 ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE));
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, tex.wrapT === 1 ? gl.REPEAT : (tex.wrapT === 2 ? gl.MIRRORED_REPEAT : gl.CLAMP_TO_EDGE));
+          texMap[tex.file] = t;
+          resolve();
+        };
+        img.onerror = () => {
+          console.warn("Failed to load texture:", tex.file);
+          resolve();
+        };
+        img.src = 'textures/' + tex.file;
+      });
+      promises.push(p);
+    }
+  }
+  await Promise.all(promises);
+  statusLabels.textContent = "Ready";
+}
+
+async function render() {
+  const objects = SCENE.frames[0].objects;
+  await loadTextures(objects);
+  document.getElementById('obj-count').textContent = objects.length;
+
+  gl.clearColor(0.1, 0.1, 0.12, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  canvas.onmousemove = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.round(e.clientX - r.left);
+    const y = Math.round(e.clientY - r.top);
+    document.getElementById('coords').textContent = x + ", " + y;
+  };
+
+  for (const obj of objects) {
+    if (!obj.triangles || obj.triangles.length === 0) continue;
+
+    // Set Blending
+    if (obj.blendEnable === false) gl.disable(gl.BLEND);
+    else {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
+
+    const vertices = [], colors = [], uvs = [[],[],[],[],[],[],[],[]];
+    for (const v of obj.triangles) {
+      vertices.push(v.sx, v.sy);
+      colors.push(v.r, v.g, v.b, v.a);
+      for(let t=0; t<8; t++) uvs[t].push(v.uvs[t][0], v.uvs[t][1]);
+    }
+
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const cbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(aColor);
+    gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
+
+    for(let t=0; t<8; t++) {
+        const uvbo = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, uvbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs[t]), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(aUv[t]);
+        gl.vertexAttribPointer(aUv[t], 2, gl.FLOAT, false, 0, 0);
+    }
+
+    // Set Uniforms
+    gl.uniform1i(uNumStages, obj.tevStages || 0);
+    const c0 = obj.tevColorRegs.c0 || [0,0,0,0];
+    const c1 = obj.tevColorRegs.c1 || [0,0,0,0];
+    const c2 = obj.tevColorRegs.c2 || [0,0,0,0];
+    const cData = new Float32Array([
+        c0[0]/255, c0[1]/255, c0[2]/255, c0[3]/255,
+        c1[0]/255, c1[1]/255, c1[2]/255, c1[3]/255,
+        c2[0]/255, c2[1]/255, c2[2]/255, c2[3]/255
+    ]);
+    gl.uniform4fv(uC, cData);
+    gl.uniform4f(uPrevInit, 0, 0, 0, 0);
+
+    // Set Konst colors per stage
+    const kData = new Float32Array(16 * 4);
+    const kRegs = obj.tevKonstRegs || {};
+    const kSel = obj.tevKonstSel || [];
+    for(let i=0; i<16; i++) {
+        if(kSel[i]) {
+            // Simplified: mapping kSel to actual konst color fractions or regs
+            const k = kRegs['k0'] || [255,255,255,255]; // fallback
+            kData.set([k[0]/255, k[1]/255, k[2]/255, k[3]/255], i*4);
         }
+    }
+    gl.uniform4fv(uK, kData);
 
-        function render() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0,0,canvas.width,canvas.height);
-            frame.objects.forEach(obj => {
-                if (!obj.verts || obj.verts.length < 3) return;
-                
-                // Simple triangulation rendering
-                for (let i=0; i+2 < obj.verts.length; i+=3) {
-                    drawTri(obj.verts[i], obj.verts[i+1], obj.verts[i+2], obj);
-                }
-            });
+    // Set Textures 
+    if (obj.textures && obj.textures.length > 0) {
+      // Map up to 8 textures
+      const enabled = new Int32Array(16);
+      const texIndices = new Int32Array(16);
+      const uvIndices = new Int32Array(16);
+      const tref = obj.tevTref || [];
+      
+      for(let i=0; i<8 && i<obj.textures.length; i++) {
+          gl.activeTexture(gl.TEXTURE0 + i);
+          gl.bindTexture(gl.TEXTURE_2D, texMap[obj.textures[i].file]);
+          gl.uniform1i(uTex[i], i);
+      }
+
+      for(let i=0; i<16; i++) {
+          if (tref[i] && tref[i].texEnable) {
+              enabled[i] = 1;
+              // find which texture index in obj.textures corresponds to tref[i].texMap
+              const tIdx = obj.textures.findIndex(t => t.unit === tref[i].texMap);
+              if (tIdx >= 0) {
+                texIndices[i] = tIdx;
+                uvIndices[i] = tref[i].texCoord;
+              } else { enabled[i] = 0; }
+          }
+      }
+      gl.uniform1iv(uTexEnabled, enabled);
+      gl.uniform1iv(uTexIndices, texIndices);
+      gl.uniform1iv(uUvIndices, uvIndices);
+    }
+
+    // Set TEV Ops
+    const cOps = new Int32Array(16 * 4), aOps = new Int32Array(16 * 4);
+    for(let i=0; i<16; i++) {
+        if (obj.tevColorOps && obj.tevColorOps[i]) {
+            cOps.set(obj.tevColorOps[i], i*4);
+            aOps.set(obj.tevAlphaOps[i], i*4);
         }
+    }
+    gl.uniform4iv(uColorOps, cOps);
+    gl.uniform4iv(uAlphaOps, aOps);
 
-        function drawTri(v1, v2, v3, obj) {
-            ctx.beginPath();
-            ctx.moveTo(v1[0], v1[1]);
-            ctx.lineTo(v2[0], v2[1]);
-            ctx.lineTo(v3[0], v3[1]);
-            ctx.closePath();
-            
-            if (obj.textures.length > 0 && images[obj.textures[0].f]) {
-                const img = images[obj.textures[0].f];
-                ctx.save();
-                ctx.clip();
-                // Extremely simplified: draw image stretched to object bounds
-                // Perfect GX rendering requires WebGL, but 2D is better for "simplified export"
-                const minX = Math.min(v1[0], v2[0], v3[0]);
-                const minY = Math.min(v1[1], v2[1], v3[1]);
-                const maxX = Math.max(v1[0], v2[0], v3[0]);
-                const maxY = Math.max(v1[1], v2[1], v3[1]);
-                ctx.drawImage(img, minX, minY, maxX - minX, maxY - minY);
-                ctx.restore();
-            } else {
-                ctx.fillStyle = `rgba(${v1[4]*255},${v1[5]*255},${v1[6]*255},${v1[7]})`;
-                ctx.fill();
-            }
-        }
+    gl.drawArrays(gl.TRIANGLES, 0, obj.triangles.length);
+  }
+  document.getElementById('status').textContent = 'Done';
+}
 
-        frame.objects.forEach(obj => {
-            const div = document.createElement('div');
-            div.className = 'obj-item';
-            const type = obj.textures.length > 0 ? 'Textured' : 'Solid';
-            div.innerHTML = `
-                <div style="display:flex;align-items:center;justify-content:space-between">
-                    <span><span class="badge">${obj.id}</span> <b>${type}</b></span>
-                    <small style="opacity:0.5">${obj.verts.length/3} Tris</small>
-                </div>
-                ${obj.textures.length > 0 ? `<div style="font-size:0.75rem;margin-top:4px;opacity:0.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${obj.textures[0].f}</div>` : ''}
-            `;
-            div.onclick = () => {
-                document.querySelectorAll('.obj-item').forEach(el => el.classList.remove('active'));
-                div.classList.add('active');
-                info.innerHTML = `
-                    <div style="font-weight:700;font-size:1.1rem;margin-bottom:8px">Object ID ${obj.id}</div>
-                    <div class="stat-grid">
-                        <div class="stat-box"><div class="stat-label">Vertices</div><div class="stat-val">${obj.verts.length}</div></div>
-                        <div class="stat-box"><div class="stat-label">TEV Stages</div><div class="stat-val">${obj.stages}</div></div>
-                        <div class="stat-box"><div class="stat-label">Texture</div><div class="stat-val">${obj.textures.length > 0 ? 'Yes' : 'No'}</div></div>
-                        <div class="stat-box"><div class="stat-label">Alpha</div><div class="stat-val">${obj.blend ? (obj.blend.en ? 'Enabled' : 'Disabled') : 'N/A'}</div></div>
-                    </div>
-                `;
-            };
-            objList.appendChild(div);
-        });
+render();
+)JS";
+  html << "</script>\n</body>\n</html>\n";
 
-        loadImages();
-    </script>
-</body>
-</html>)HTML";
-
-  const std::filesystem::path html_path = export_dir / "index.html";
-  std::ofstream(html_path.string()) << html.str();
+  const std::filesystem::path html_path = export_dir / "scene.html";
+  std::ofstream html_file(html_path.string());
+  if (html_file.is_open())
+  {
+    html_file << html.str();
+    html_file.close();
+  }
 
   if (!headless)
   {
