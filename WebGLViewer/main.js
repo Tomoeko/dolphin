@@ -380,8 +380,104 @@ const TexDecoder = {
                         }
                     }
                     continue; 
+                } else if (format === 0x2) { // IA4
+                    for (let ty = 0; ty < bh; ty++) {
+                        for (let tx = 0; tx < bw; tx++) {
+                            const px = bx * bw + tx;
+                            const py = by * bh + ty;
+                            if (px < width && py < height) {
+                                const dstOffset = (py * width + px) * 4;
+                                const val = src[srcOffset++];
+                                const a = ((val >> 4) & 0xF) * (255/15);
+                                const l = (val & 0xF) * (255/15);
+                                dst[dstOffset + 0] = l;
+                                dst[dstOffset + 1] = l;
+                                dst[dstOffset + 2] = l;
+                                dst[dstOffset + 3] = a;
+                            } else {
+                                srcOffset++;
+                            }
+                        }
+                    }
+                    continue;
+                } else if (format === 0x0) { // I4
+                    for (let ty = 0; ty < bh; ty++) {
+                        for (let tx = 0; tx < bw; tx += 2) {
+                            const val = src[srcOffset++];
+                            for (let i = 0; i < 2; i++) {
+                                const pix = (i === 0) ? (val >> 4) : (val & 0xF);
+                                const px = bx * bw + tx + i;
+                                const py = by * bh + ty;
+                                if (px < width && py < height) {
+                                    const dstOffset = (py * width + px) * 4;
+                                    const l = pix * (255/15);
+                                    dst[dstOffset + 0] = l;
+                                    dst[dstOffset + 1] = l;
+                                    dst[dstOffset + 2] = l;
+                                    dst[dstOffset + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                } else if (format === 0xE) { // CMPR (DXT1)
+                    // CMPR uses 8x8 blocks, but internal layout is 4 sub-blocks of 4x4
+                    const subBlocks = [
+                        { dx: 0, dy: 0 }, { dx: 4, dy: 0 },
+                        { dx: 0, dy: 4 }, { dx: 4, dy: 4 }
+                    ];
+
+                    for (const sb of subBlocks) {
+                        const c1 = (src[srcOffset] << 8) | src[srcOffset + 1];
+                        const c2 = (src[srcOffset + 2] << 8) | src[srcOffset + 3];
+                        srcOffset += 4;
+
+                        const r1 = ((c1 >> 11) & 0x1F) * (255 / 31);
+                        const g1 = ((c1 >> 5) & 0x3F) * (255 / 63);
+                        const b1 = (c1 & 0x1F) * (255 / 31);
+
+                        const r2 = ((c2 >> 11) & 0x1F) * (255 / 31);
+                        const g2 = ((c2 >> 5) & 0x3F) * (255 / 63);
+                        const b2 = (c2 & 0x1F) * (255 / 31);
+
+                        const colors = [
+                            [r1, g1, b1, 255],
+                            [r2, g2, b2, 255]
+                        ];
+
+                        if (c1 > c2) {
+                            colors.push([
+                                (2 * r1 + r2) / 3, (2 * g1 + g2) / 3, (2 * b1 + b2) / 3, 255
+                            ]);
+                            colors.push([
+                                (r1 + 2 * r2) / 3, (g1 + 2 * g2) / 3, (b1 + 2 * b2) / 3, 255
+                            ]);
+                        } else {
+                            colors.push([
+                                (r1 + r2) / 2, (g1 + g2) / 2, (b1 + b2) / 2, 255
+                            ]);
+                            colors.push([0, 0, 0, 0]); // Transparent black
+                        }
+
+                        for (let ty = 0; ty < 4; ty++) {
+                            const row = src[srcOffset++];
+                            for (let tx = 0; tx < 4; tx++) {
+                                const pixIdx = (row >> (6 - tx * 2)) & 0x3;
+                                const px = bx * bw + sb.dx + tx;
+                                const py = by * bh + sb.dy + ty;
+                                if (px < width && py < height) {
+                                    const dstOffset = (py * width + px) * 4;
+                                    dst[dstOffset + 0] = colors[pixIdx][0];
+                                    dst[dstOffset + 1] = colors[pixIdx][1];
+                                    dst[dstOffset + 2] = colors[pixIdx][2];
+                                    dst[dstOffset + 3] = colors[pixIdx][3];
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 } else {
-                    // Fallback mock colors for unsupported formats (I4, IA4, CMPR)
+                    // Fallback mock colors for unsupported formats
                     srcOffset += this.getBytesPerBlock(format);
                 }
 
