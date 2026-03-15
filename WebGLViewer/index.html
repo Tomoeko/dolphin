@@ -101,8 +101,13 @@
         <!-- Texture Inspector Sidebar -->
         <aside class="texture-inspector" id="textureInspector">
             <div class="sidebar-header">
-                <h2>Texture Inspector</h2>
-                <p>Decoded GX Assets</p>
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <div>
+                        <h2>Texture Inspector</h2>
+                        <p>Decoded GX Assets</p>
+                    </div>
+                    <button id="resetTextures" class="reset-btn-small">Reset All</button>
+                </div>
             </div>
             <div id="textureList" class="texture-list">
                 <!-- Textures will be injected here -->

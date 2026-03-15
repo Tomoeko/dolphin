@@ -852,8 +852,8 @@ const TexDecoder = {
                             const py = by * bh + ty;
                             if (px < width && py < height) {
                                 const dstOffset = (py * width + px) * 4;
-                                const a = src[srcOffset++];
                                 const l = src[srcOffset++];
+                                const a = src[srcOffset++];
                                 dst[dstOffset + 0] = l;
                                 dst[dstOffset + 1] = l;
                                 dst[dstOffset + 2] = l;
@@ -890,8 +890,8 @@ const TexDecoder = {
                             if (px < width && py < height) {
                                 const dstOffset = (py * width + px) * 4;
                                 const val = src[srcOffset++];
-                                const a = ((val >> 4) & 0xF) * (255/15);
-                                const l = (val & 0xF) * (255/15);
+                                const l = ((val >> 4) & 0xF) * (255/15);
+                                const a = (val & 0xF) * (255/15);
                                 dst[dstOffset + 0] = l;
                                 dst[dstOffset + 1] = l;
                                 dst[dstOffset + 2] = l;
@@ -1072,6 +1072,10 @@ function addTextureToInspector(unitIndex, rgba8) {
             <div class="texture-meta">Res: ${tex.width} x ${tex.height}</div>
             <div class="texture-meta">Format: ${formatName}</div>
             <div class="texture-meta">Last Unit: ${unitIndex}</div>
+            <label class="visibility-toggle">
+                <input type="checkbox" id="visibility-${addrHex}" ${!HIDDEN_TEXTURES.has(addrHex) ? 'checked' : ''}>
+                <span>Visible</span>
+            </label>
             <button class="copy-btn" id="copy-${addrHex}">Copy Info</button>
         </div>
     `;
@@ -1080,7 +1084,7 @@ function addTextureToInspector(unitIndex, rgba8) {
         let text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
         
         // Find Renderer Positions
-        const renPrims = rendererPrimitives.filter(p => p.addr === addrHex);
+        const renPrims = rendererPrimitives.filter(p => p.texAddr === addrHex);
         if (renPrims.length > 0) {
             text += `\n\n[Renderer Tab] Found ${renPrims.length} occurrences:`;
             renPrims.forEach((p, idx) => {
@@ -1090,6 +1094,7 @@ function addTextureToInspector(unitIndex, rgba8) {
         }
 
         // Find Comparison Positions
+        const overlayLayer = document.getElementById('overlayLayer');
         const overlays = Array.from(overlayLayer.querySelectorAll('.texture-overlay')).filter(ov => {
             const meta = JSON.parse(ov.dataset.metadata || '{}');
             return meta.addr === addrHex;
@@ -1121,7 +1126,31 @@ function addTextureToInspector(unitIndex, rgba8) {
             console.log(text);
         });
     });
+
+    // Handle visibility checkbox
+    const checkbox = card.querySelector(`#visibility-${addrHex}`);
+    checkbox.addEventListener('change', (e) => {
+        if (e.target.checked) {
+            HIDDEN_TEXTURES.delete(addrHex);
+            card.classList.remove('hidden');
+        } else {
+            HIDDEN_TEXTURES.add(addrHex);
+            card.classList.add('hidden');
+        }
+        tryRender(); // Re-render to show changes
+    });
 }
+
+document.getElementById('resetTextures').addEventListener('click', () => {
+    HIDDEN_TEXTURES.clear();
+    const cards = document.querySelectorAll('.texture-card');
+    cards.forEach(card => {
+        card.classList.remove('hidden');
+        const checkbox = card.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = true;
+    });
+    tryRender();
+});
 
 // Comparison View Overlay Logic
 overlayLayer.addEventListener('dragover', (e) => {
@@ -1378,6 +1407,7 @@ class BPMemory {
     }
 }
 const BPState = new BPMemory();
+const HIDDEN_TEXTURES = new Set();
 
 // UI Handlers
 document.getElementById('jsonInput').addEventListener('change', (e) => {
@@ -1582,22 +1612,24 @@ function drawPrimitive(cmd) {
     }
 
     let boundTex = false;
-    let primaryAddr = null;
-    const vcd_init = CPState.vcd[cmd.vat];
+    let primaryUnit = -1;
     for (let i = 0; i < 8; i++) {
-        const hasTex = (i === 0 && vcd_init.Tex0) || (i === 1 && vcd_init.Tex1) || (i === 2 && vcd_init.Tex2) || (i === 3 && vcd_init.Tex3) ||
-                      (i === 4 && vcd_init.Tex4) || (i === 5 && vcd_init.Tex5) || (i === 6 && vcd_init.Tex6) || (i === 7 && vcd_init.Tex7);
-        if (hasTex) {
-            primaryAddr = BPState.textures[i].imageBase.toString(16).toUpperCase();
+        const hasTex = (i === 0 && vcd.Tex0) || (i === 1 && vcd.Tex1) || (i === 2 && vcd.Tex2) || (i === 3 && vcd.Tex3) ||
+                      (i === 4 && vcd.Tex4) || (i === 5 && vcd.Tex5) || (i === 6 && vcd.Tex6) || (i === 7 && vcd.Tex7);
+        if (hasTex && BPState.textures[i].webglTexture) {
+            const addrHex = BPState.textures[i].imageBase.toString(16).toUpperCase();
+            if (HIDDEN_TEXTURES.has(addrHex)) {
+                // If the texture is hidden, we skip this draw call for visual debugging
+                return;
+            }
+            primaryUnit = i;
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, BPState.textures[i].webglTexture);
             boundTex = true;
             break;
         }
     }
-    if (vcd.Tex0 && BPState.textures[0].webglTexture) {
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, BPState.textures[0].webglTexture);
-        boundTex = true;
-    } else {
+    if (!boundTex) {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, null);
     }
@@ -1771,23 +1803,9 @@ function drawPrimitive(cmd) {
             ptr += 2;
         }
 
-        if (vcd.Tex0 === 1) { // Direct
-            const elements = (vat.Tex0CoordElements === 0) ? 1 : 2;
-            const resS = readComponent(ptr, vat.Tex0CoordFormat, vat.Tex0Frac); ptr += resS.size;
-            u = resS.val;
-            if (elements === 2) {
-                const resT = readComponent(ptr, vat.Tex0CoordFormat, vat.Tex0Frac); ptr += resT.size;
-                v = resT.val;
-            }
-        } else if (vcd.Tex0 === 2) { // 8-bit Index
-            ptr += 1;
-        } else if (vcd.Tex0 === 3) { // 16-bit Index
-            ptr += 2;
-        }
-        
-        // Skip Tex1-7
-        const texVCDs = [vcd.Tex1, vcd.Tex2, vcd.Tex3, vcd.Tex4, vcd.Tex5, vcd.Tex6, vcd.Tex7];
+        const texVCDs = [vcd.Tex0, vcd.Tex1, vcd.Tex2, vcd.Tex3, vcd.Tex4, vcd.Tex5, vcd.Tex6, vcd.Tex7];
         const texVATs = [
+            { el: vat.Tex0CoordElements, fmt: vat.Tex0CoordFormat, frac: vat.Tex0Frac },
             { el: vat.Tex1CoordElements, fmt: vat.Tex1CoordFormat, frac: vat.Tex1Frac },
             { el: vat.Tex2CoordElements, fmt: vat.Tex2CoordFormat, frac: vat.Tex2Frac },
             { el: vat.Tex3CoordElements, fmt: vat.Tex3CoordFormat, frac: vat.Tex3Frac },
@@ -1797,12 +1815,19 @@ function drawPrimitive(cmd) {
             { el: vat.Tex7CoordElements, fmt: vat.Tex7CoordFormat, frac: vat.Tex7Frac }
         ];
 
-        for(let j=0; j<7; j++) {
-            if (texVCDs[j] === 1) {
+        for(let j=0; j<8; j++) {
+            if (texVCDs[j] === 1) { // Direct
                 const elements = (texVATs[j].el === 0) ? 1 : 2;
                 const resS = readComponent(ptr, texVATs[j].fmt, texVATs[j].frac); ptr += resS.size;
+                let curU = resS.val;
+                let curV = 0;
                 if (elements === 2) {
                     const resT = readComponent(ptr, texVATs[j].fmt, texVATs[j].frac); ptr += resT.size;
+                    curV = resT.val;
+                }
+                if (j === primaryUnit) {
+                    u = curU;
+                    v = curV;
                 }
             } else if (texVCDs[j] === 2) { // 8-bit Index
                 ptr += 1;
@@ -1916,8 +1941,9 @@ function drawPrimitive(cmd) {
     if (drawCalls < 2) {
         console.log(`DrawCall ${drawCalls}: prim=${cmd.primitive}, verts=${numVerts}, mtxBase=${mtxBase}, posMatIdx=${posMatIdx}`);
         console.log(`  RawV0: [${firstVertexRaw.x.toFixed(2)}, ${firstVertexRaw.y.toFixed(2)}, ${firstVertexRaw.z.toFixed(2)}]`);
-        console.log(`  Matrix[${mtxBase}]: [${XFState.posMatrices[mtxBase]}, ${XFState.posMatrices[mtxBase+1]}, ${XFState.posMatrices[mtxBase+2]}, ${XFState.posMatrices[mtxBase+3]}]`);
-        console.log(`  Matrix[0]: [${XFState.posMatrices[0]}, ${XFState.posMatrices[1]}, ${XFState.posMatrices[2]}, ${XFState.posMatrices[3]}]`);
+        console.log(`  Matrix[${mtxBase}] Row0: [${XFState.posMatrices[mtxBase+0]}, ${XFState.posMatrices[mtxBase+1]}, ${XFState.posMatrices[mtxBase+2]}, ${XFState.posMatrices[mtxBase+3]}]`);
+        console.log(`  Matrix[${mtxBase}] Row1: [${XFState.posMatrices[mtxBase+4]}, ${XFState.posMatrices[mtxBase+5]}, ${XFState.posMatrices[mtxBase+6]}, ${XFState.posMatrices[mtxBase+7]}]`);
+        console.log(`  Matrix[${mtxBase}] Row2: [${XFState.posMatrices[mtxBase+8]}, ${XFState.posMatrices[mtxBase+9]}, ${XFState.posMatrices[mtxBase+10]}, ${XFState.posMatrices[mtxBase+11]}]`);
         console.log(`  FinalV0: [${positions[0].toFixed(2)}, ${positions[1].toFixed(2)}, ${positions[2].toFixed(2)}]`);
     }
     
@@ -1941,7 +1967,7 @@ function drawPrimitive(cmd) {
                 const ndcX = cx / cw;
                 const ndcY = cy / cw;
                 const px = (ndcX + 1.0) * 320;
-                const py = (1.0 - ndcY) * 180; // 0 at Top for selection mapping
+                const py = (1.0 - ndcY) * 240; // 0 at Top for selection mapping (640x480)
                 minX = Math.min(minX, px); minY = Math.min(minY, py);
                 maxX = Math.max(maxX, px); maxY = Math.max(maxY, py);
             }
@@ -1950,7 +1976,7 @@ function drawPrimitive(cmd) {
         rendererPrimitives.push({
             drawCallIndex: drawCalls,
             bbox: [minX, minY, maxX, maxY],
-            texAddr: primaryAddr,
+            texAddr: boundTex && primaryUnit !== -1 ? BPState.textures[primaryUnit].imageBase.toString(16).toUpperCase() : null,
             states: {
                 zMode: BPState.zMode,
                 alphaTest: BPState.alphaTest,
