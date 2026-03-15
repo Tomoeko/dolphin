@@ -1,0 +1,139 @@
+:root {
+    --bg-dark: #121212;
+    --bg-panel: rgba(25, 25, 27, 0.85);
+    --border-alpha: rgba(255, 255, 255, 0.1);
+    --accent: #00d2ff;
+    --accent-hover: #3a7bd5;
+    --text-primary: #f0f0f0;
+    --text-secondary: #a0a0a0;
+}
+
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    overflow: hidden;
+}
+
+.app-container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(circle at 50% 50%, #1a1a2e 0%, #121212 100%);
+}
+
+.sidebar {
+    width: 320px;
+    background: var(--bg-panel);
+    backdrop-filter: blur(20px);
+    border-right: 1px solid var(--border-alpha);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    box-shadow: 5px 0 15px rgba(0,0,0,0.5);
+    z-index: 10;
+}
+
+.sidebar-header h2 {
+    margin: 0 0 8px 0;
+    font-size: 22px;
+    font-weight: 600;
+    background: -webkit-linear-gradient(45deg, var(--accent), var(--accent-hover));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.sidebar-header p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.control-group h3 {
+    font-size: 14px;
+    margin: 0 0 16px 0;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.file-upload {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 14px;
+    background: rgba(255,255,255,0.05);
+    border: 1px dashed var(--border-alpha);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-sizing: border-box;
+}
+
+.file-upload:hover {
+    background: rgba(255,255,255,0.1);
+    border-color: var(--accent);
+}
+
+.file-upload input {
+    display: none;
+}
+
+.file-upload span {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.status-panel {
+    margin-top: auto;
+    padding: 16px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--text-secondary);
+    word-break: break-all;
+    border: 1px solid var(--border-alpha);
+}
+
+.toggle-switch {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.toggle-switch label {
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.workspace {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.canvas-container {
+    background: #000;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+
+canvas {
+    display: block;
+    image-rendering: pixelated;
+}

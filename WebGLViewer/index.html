@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dolphin DFF WebGL Viewer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar for Controls -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>Dolphin DFF Viewer</h2>
+                <p>WebGL GX Emulator</p>
+            </div>
+            
+            <div class="control-group">
+                <h3>1. Load JSON Data</h3>
+                <label class="file-upload">
+                    <input type="file" id="jsonInput" accept=".json">
+                    <span id="jsonLabel">Select .json File</span>
+                </label>
+            </div>
+
+            <div class="control-group">
+                <h3>2. Load MEM Data</h3>
+                <label class="file-upload">
+                    <input type="file" id="memInput" accept=".mem">
+                    <span id="memLabel">Select .mem File</span>
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <h3>3. Render Options</h3>
+                <div class="toggle-switch">
+                    <input type="checkbox" id="wireframeToggle">
+                    <label for="wireframeToggle">Wireframe Mode</label>
+                </div>
+            </div>
+
+            <div class="status-panel" id="statusPanel">
+                Waiting for files...
+            </div>
+        </aside>
+
+        <!-- Main Workspace for Canvas -->
+        <main class="workspace">
+            <div class="canvas-container">
+                <canvas id="glcanvas" width="640" height="528"></canvas>
+            </div>
+        </main>
+    </div>
+    
+    <script src="gl-matrix-min.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
