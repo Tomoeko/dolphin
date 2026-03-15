@@ -53,8 +53,9 @@
             </div>
             
             <div id="rendererContent" class="tab-view active">
-                <div class="canvas-container">
-                    <canvas id="glcanvas" width="640" height="528"></canvas>
+                <div class="canvas-container" style="position: relative;">
+                    <canvas id="glcanvas" width="640" height="360"></canvas>
+                    <svg id="rendererOverlay" width="640" height="360" style="position: absolute; top: 0; left: 0; pointer-events: none;"></svg>
                 </div>
             </div>
 

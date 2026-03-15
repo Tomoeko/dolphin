@@ -25,6 +25,7 @@ let currentPanX = 0;
 let currentPanY = 0;
 let isPanning = false;
 let startX, startY;
+let currentSelectedAddr = null;
 
 function updateTransform() {
     // We use translate then scale. For zoom-to-cursor, we adjust pan during the wheel event.
@@ -150,14 +151,57 @@ tabComparison.addEventListener('click', () => {
 
 function selectTextureByAddress(addrHex) {
     if (!addrHex) return;
-    const cardId = `tex-card-${addrHex.toUpperCase()}`;
+    currentSelectedAddr = addrHex.toUpperCase();
+    const cardId = `tex-card-${currentSelectedAddr}`;
+    
+    // Update Inspector List
     const allCards = document.querySelectorAll('.texture-card');
     allCards.forEach(c => c.classList.remove('selected'));
     
     const card = document.getElementById(cardId);
     if (card) {
         card.classList.add('selected');
-        card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        card.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+    }
+
+    updateSelectedHighlights();
+}
+
+function updateSelectedHighlights() {
+    // 1. Update Comparison Overlays
+    const overlays = document.querySelectorAll('.texture-overlay');
+    overlays.forEach(ov => {
+        const meta = JSON.parse(ov.dataset.metadata || '{}');
+        if (meta.addr === currentSelectedAddr) {
+            ov.classList.add('selected');
+        } else {
+            ov.classList.remove('selected');
+        }
+    });
+
+    // 2. Update Renderer Overlay (SVG)
+    const svg = document.getElementById('rendererOverlay');
+    svg.innerHTML = '';
+    
+    if (currentSelectedAddr) {
+        const matches = rendererPrimitives.filter(p => p.addr === currentSelectedAddr);
+        
+        // Deduplicate boxes to avoid "double lines" from overlapping primitives
+        const uniqueBoxes = new Set();
+        matches.forEach(p => {
+            const [x1, y1, x2, y2] = p.bbox.map(n => Math.round(n));
+            const key = `${x1},${y1},${x2},${y2}`;
+            if (uniqueBoxes.has(key)) return;
+            uniqueBoxes.add(key);
+
+            const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            rect.setAttribute("x", x1);
+            rect.setAttribute("y", y1);
+            rect.setAttribute("width", x2 - x1);
+            rect.setAttribute("height", y2 - y1);
+            rect.setAttribute("class", "selection-highlight");
+            svg.appendChild(rect);
+        });
     }
 }
 
@@ -166,8 +210,13 @@ let rendererPrimitives = []; // Array of { bbox: [minX, minY, maxX, maxY], addr:
 canvas.addEventListener('click', (e) => {
     if (!tabRenderer.classList.contains('active')) return;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    
+    // FIX: Scale click coordinates to match internal 640x360 resolution
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
     
     // Primitives are stored in render order. Check from top-most (last drawn)
     for (let i = rendererPrimitives.length - 1; i >= 0; i--) {
@@ -179,14 +228,19 @@ canvas.addEventListener('click', (e) => {
             }
         }
     }
+    
+    // Clicked empty space
+    currentSelectedAddr = null;
+    updateSelectedHighlights();
+    document.querySelectorAll('.texture-card').forEach(c => c.classList.remove('selected'));
 });
 
 function checkAndLoadReference() {
     const syncHeight = () => {
         const container = document.getElementById('comparisonContainer');
-        const imgRatio = referenceImg.naturalHeight / referenceImg.naturalWidth;
-        container.style.height = `${container.clientWidth * imgRatio}px`;
-        container.style.minHeight = container.style.height;
+        // Force 360px height for the 16:9 workspace regardless of image natural size
+        container.style.height = `360px`;
+        container.style.minHeight = `360px`;
     };
 
     referenceImg.onload = () => {
@@ -470,10 +524,14 @@ class XFMemory {
     constructor() {
         this.posMatrices = new Float32Array(1024); // Support full 64 matrices + overhead
         this.projectionMatrix = mat4.create();
+        this.viewport = { wd: 320, ht: 180, xOrig: 320, yOrig: 180 }; // Default 640x360 center
+        this.projectionType = 1; // 0=Persp, 1=Ortho
         mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000); // Default
     }
     reset() {
         this.posMatrices.fill(0);
+        this.viewport = { wd: 320, ht: 180, xOrig: 320, yOrig: 180 };
+        this.projectionType = 1;
         mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000);
     }
 }
@@ -785,8 +843,30 @@ function addTextureToInspector(unitIndex, rgba8) {
         card = document.createElement('div');
         card.id = cardId;
         card.className = 'texture-card';
-        card.addEventListener('click', () => selectTextureByAddress(addrHex));
+        card.draggable = true; // Make the whole card draggable to prevent misclicks
+        
+        card.addEventListener('click', (e) => {
+            e.stopPropagation();
+            selectTextureByAddress(addrHex);
+        });
+
+        // Add drag start listener to the card
+        card.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('texData', JSON.stringify({
+                addr: addrHex,
+                src: dataUrl,
+                w: tex.width,
+                h: tex.height,
+                format: formatName,
+                unit: unitIndex
+            }));
+        });
+
         list.appendChild(card);
+    }
+
+    if (currentSelectedAddr === addrHex) {
+        card.classList.add('selected');
     }
 
     const formatName = FORMAT_NAMES[tex.format] || `0x${tex.format.toString(16)}`;
@@ -794,9 +874,7 @@ function addTextureToInspector(unitIndex, rgba8) {
 
     card.innerHTML = `
         <div class="texture-thumb-container">
-            <img class="texture-thumb" src="${dataUrl}" alt="Texture 0x${addrHex}" 
-                 draggable="true" 
-                 id="thumb-${addrHex}">
+            <img class="texture-thumb" src="${dataUrl}" alt="Texture 0x${addrHex}">
         </div>
         <div class="texture-info">
             <div class="texture-name">Texture @ 0x${addrHex}</div>
@@ -806,18 +884,6 @@ function addTextureToInspector(unitIndex, rgba8) {
             <button class="copy-btn" id="copy-${addrHex}">Copy Info</button>
         </div>
     `;
-
-    // Add drag start listener to the thumbnail
-    document.getElementById(`thumb-${addrHex}`).addEventListener('dragstart', (e) => {
-        e.dataTransfer.setData('texData', JSON.stringify({
-            addr: addrHex,
-            src: dataUrl,
-            w: tex.width,
-            h: tex.height,
-            format: formatName,
-            unit: unitIndex
-        }));
-    });
 
     document.getElementById(`copy-${addrHex}`).addEventListener('click', () => {
         let text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
@@ -886,9 +952,82 @@ overlayLayer.addEventListener('drop', (e) => {
     createOverlay(data, x, y);
 });
 
+// Global Drag State for Overlays
+let activeOverlay = null;
+let activeOverlayData = null;
+let isMovingOverlay = false;
+let isResizingOverlay = false;
+let overlayStartX = 0, overlayStartY = 0;
+let overlayStartLeft = 0, overlayStartTop = 0;
+let overlayStartW = 0, overlayStartH = 0;
+let overlayRAFScheduled = false;
+let overlayLatestClientX = 0;
+let overlayLatestClientY = 0;
+
+window.addEventListener('mousemove', (e) => {
+    if (!isMovingOverlay && !isResizingOverlay) return;
+    
+    overlayLatestClientX = e.clientX;
+    overlayLatestClientY = e.clientY;
+
+    if (overlayRAFScheduled) return;
+    overlayRAFScheduled = true;
+
+    requestAnimationFrame(() => {
+        overlayRAFScheduled = false;
+        if (!activeOverlay) return;
+
+        if (isMovingOverlay) {
+            const dx = (overlayLatestClientX - overlayStartX) / currentZoom;
+            const dy = (overlayLatestClientY - overlayStartY) / currentZoom;
+            const newLeft = overlayStartLeft + dx;
+            const newTop = overlayStartTop + dy;
+            activeOverlay.style.left = `${newLeft}px`;
+            activeOverlay.style.top = `${newTop}px`;
+            
+            if (activeOverlay.updateLabelFunc) {
+                activeOverlay.updateLabelFunc(newLeft, newTop, parseFloat(activeOverlay.style.width), parseFloat(activeOverlay.style.height));
+            }
+        } else if (isResizingOverlay) {
+            const dx = (overlayLatestClientX - overlayStartX) / currentZoom;
+            const dy = (overlayLatestClientY - overlayStartY) / currentZoom;
+            
+            const aspectRatio = activeOverlayData.w / activeOverlayData.h;
+            let curW, curH;
+            
+            if (Math.abs(dx) > Math.abs(dy)) {
+                curW = Math.max(10, overlayStartW + dx);
+                curH = curW / aspectRatio;
+            } else {
+                curH = Math.max(10, overlayStartH + dy);
+                curW = curH * aspectRatio;
+            }
+            
+            activeOverlay.style.width = `${curW}px`;
+            activeOverlay.style.height = `${curH}px`;
+            
+            if (activeOverlay.updateLabelFunc) {
+                activeOverlay.updateLabelFunc(parseFloat(activeOverlay.style.left), parseFloat(activeOverlay.style.top), curW, curH);
+            }
+        }
+    });
+});
+
+window.addEventListener('mouseup', () => {
+    if (isMovingOverlay || isResizingOverlay) {
+        if (activeOverlay && activeOverlayData) {
+            console.log(`[Alignment Debug] Texture 0x${activeOverlayData.addr} ${isMovingOverlay ? 'moved' : 'resized'} to X: ${parseInt(activeOverlay.style.left)}, Y: ${parseInt(activeOverlay.style.top)}, W: ${parseInt(activeOverlay.style.width)}, H: ${parseInt(activeOverlay.style.height)}`);
+        }
+        isMovingOverlay = false;
+        isResizingOverlay = false;
+        activeOverlay = null;
+        activeOverlayData = null;
+    }
+});
+
 function createOverlay(data, x, y) {
     const overlay = document.createElement('div');
-    overlay.className = 'texture-overlay';
+    overlay.className = 'texture-overlay' + (data.addr === currentSelectedAddr ? ' selected' : '');
     overlay.dataset.metadata = JSON.stringify(data); // Store for reporting
     
     // Maintain state for current dimensions
@@ -907,6 +1046,11 @@ function createOverlay(data, x, y) {
     // Add Label for debugging coordinates and scale
     const label = document.createElement('div');
     label.className = 'overlay-label';
+    const labelLine1 = document.createElement('div');
+    const labelLine2 = document.createElement('div');
+    labelLine2.style.color = '#fff';
+    label.appendChild(labelLine1);
+    label.appendChild(labelLine2);
     overlay.appendChild(label);
 
     let fadeTimer = null;
@@ -937,10 +1081,8 @@ function createOverlay(data, x, y) {
         const nw = Math.round(w);
         const nh = Math.round(h);
 
-        label.innerHTML = `
-            <div>Screen: ${Math.round(l)},${Math.round(t)} | ${Math.round(w)}x${Math.round(h)}</div>
-            <div style="color: #fff">Native: ${nl},${nt} | ${nw}x${nh} (Scale: ${scaleX}x)</div>
-        `;
+        labelLine1.textContent = `Screen: ${Math.round(l)},${Math.round(t)} | ${Math.round(w)}x${Math.round(h)}`;
+        labelLine2.textContent = `Native: ${nl},${nt} | ${nw}x${nh} (Scale: ${scaleX}x)`;
         showLabel();
     };
     updateLabel(left, top, curW, curH);
@@ -954,77 +1096,35 @@ function createOverlay(data, x, y) {
     handle.className = 'resize-handle';
     overlay.appendChild(handle);
 
+    // Attach updateLabel to the DOM element so the global listener can call it
+    overlay.updateLabelFunc = updateLabel;
+    
     // Interaction logic
-    let isMoving = false;
-    let isResizing = false;
-    let startX, startY, startLeft, startTop, startW, startH;
-
-    // Movement Logic
     overlay.addEventListener('mousedown', (e) => {
         if (e.target === handle) return; // Ignore if resizing
-        isMoving = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        startLeft = parseInt(overlay.style.left);
-        startTop = parseInt(overlay.style.top);
+        isMovingOverlay = true;
+        activeOverlay = overlay;
+        activeOverlayData = data;
+        overlayStartX = e.clientX;
+        overlayStartY = e.clientY;
+        overlayStartLeft = parseInt(overlay.style.left);
+        overlayStartTop = parseInt(overlay.style.top);
         overlay.style.zIndex = 1000;
         showLabel();
         e.preventDefault();
     });
 
-    // Resizing Logic
     handle.addEventListener('mousedown', (e) => {
-        isResizing = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        startW = curW;
-        startH = curH;
+        isResizingOverlay = true;
+        activeOverlay = overlay;
+        activeOverlayData = data;
+        overlayStartX = e.clientX;
+        overlayStartY = e.clientY;
+        overlayStartW = parseInt(overlay.style.width);
+        overlayStartH = parseInt(overlay.style.height);
         showLabel();
         e.preventDefault();
         e.stopPropagation(); // Don't trigger movement
-    });
-
-    window.addEventListener('mousemove', (e) => {
-        if (isMoving) {
-            // Compensate for CSS transform scale
-            const dx = (e.clientX - startX) / currentZoom;
-            const dy = (e.clientY - startY) / currentZoom;
-            const newLeft = startLeft + dx;
-            const newTop = startTop + dy;
-            overlay.style.left = `${newLeft}px`;
-            overlay.style.top = `${newTop}px`;
-            updateLabel(newLeft, newTop, curW, curH);
-        } else if (isResizing) {
-            // Compensate for CSS transform scale
-            const dx = (e.clientX - startX) / currentZoom;
-            const dy = (e.clientY - startY) / currentZoom;
-            
-            // Proportional resizing by default
-            const aspectRatio = data.w / data.h;
-            
-            if (Math.abs(dx) > Math.abs(dy)) {
-                curW = Math.max(10, startW + dx);
-                curH = curW / aspectRatio;
-            } else {
-                curH = Math.max(10, startH + dy);
-                curW = curH * aspectRatio;
-            }
-            
-            overlay.style.width = `${curW}px`;
-            overlay.style.height = `${curH}px`;
-            updateLabel(parseInt(overlay.style.left), parseInt(overlay.style.top), curW, curH);
-        }
-    });
-
-    window.addEventListener('mouseup', () => {
-        if (isMoving) {
-            isMoving = false;
-            console.log(`[Alignment Debug] Texture 0x${data.addr} moved to X: ${parseInt(overlay.style.left)}, Y: ${parseInt(overlay.style.top)}`);
-        }
-        if (isResizing) {
-            isResizing = false;
-            console.log(`[Alignment Debug] Texture 0x${data.addr} resized to Size: ${Math.round(curW)}x${Math.round(curH)}`);
-        }
     });
 
     overlay.oncontextmenu = (e) => {
@@ -1136,33 +1236,39 @@ function applyCPCommand(cmd, val) {
 function applyXFCommand(addr, count, data) {
     const floatView = new Float32Array(new Uint32Array(data).buffer);
     
-    // PosMatrices are at 0x0000 - 0x03FF in XF memory (vector-based addressing)
-    // 64 matrices * 3 vectors/matrix = 192 vectors.
-    // Each vector is 4 floats. So float index is vector_addr * 4.
+    // PosMatrices are at float-based offsets in our JSON stream
     if (addr < 0x1000) { 
-        const floatOffset = addr * 4;
-        if (floatOffset + count <= 1024) {
+        if (addr + count <= 1024) {
             for(let i=0; i<count; i++) {
-                XFState.posMatrices[floatOffset + i] = floatView[i];
+                XFState.posMatrices[addr + i] = floatView[i];
             }
         }
     } 
-    // Projection Matrix is at 0x1010 (7 floats typically)
-    else if (addr >= 0x1010 && addr <= 0x1020) {
-        const offset = addr - 0x1010;
-        // Float 0: Type (0=Persp, 1=Ortho)
-        // Floats 1-6: Projection parameters
-        // For Ortho: left, right, top, bottom, near, far
-        // For Persp: cot_fov, aspect, near, far (2 ignored?)
-        if (floatView.length >= 7) {
-            const type = floatView[0];
-            const p = floatView.slice(1);
-            if (type === 1) { // Ortho
-                mat4.ortho(XFState.projectionMatrix, p[0], p[1], p[3], p[2], p[4], p[5]); 
-            } else if (type === 0) { // Persp
-                mat4.perspective(XFState.projectionMatrix, 2 * Math.atan(1/p[0]), p[1], p[2], p[3]);
+    // Viewport is at 0x101a (6 floats: wd, ht, zRange, xOrig, yOrig, farZ)
+    else if (addr >= 0x101a && addr <= 0x101f) {
+        const offset = addr - 0x101a;
+        if (offset === 0) XFState.viewport.wd = floatView[0];
+        if (offset <= 1 && offset + floatView.length > 1) XFState.viewport.ht = floatView[1 - offset];
+        if (offset <= 3 && offset + floatView.length > 3) XFState.viewport.xOrig = floatView[3 - offset];
+        if (offset <= 4 && offset + floatView.length > 4) XFState.viewport.yOrig = floatView[4 - offset];
+    }
+    // Projection Matrix is at 0x1020 (6 floats + Type at 0x1026)
+    else if (addr >= 0x1020 && addr <= 0x1026) {
+        const offset = addr - 0x1020;
+        // The type is at the end (XFMEM_SETPROJECTION + 6 = 0x1026)
+        // If the command is long enough to include 0x1026, parse it
+        if (offset + floatView.length > 6) {
+            const type = floatView[6 - offset];
+            XFState.projectionType = type;
+            const p = floatView; // Use the provided chunk
+            // Simplified: only recompute if we have a significant block
+            if (p.length >= 6) {
+                if (type === 1) { // Ortho
+                    mat4.ortho(XFState.projectionMatrix, p[0], p[1], p[3], p[2], p[4], p[5]); 
+                } else if (type === 0) { // Persp
+                    mat4.perspective(XFState.projectionMatrix, 2 * Math.atan(1/p[0]), p[1], p[2], p[3]);
+                }
             }
-            console.log("XF Projection Updated:", type === 1 ? "Ortho" : "Persp", p);
         }
     }
 }
@@ -1243,6 +1349,9 @@ function tryRender() {
             triangles += Math.max(0, cmd.num_vertices - 2); 
         }
     }
+    
+    // Ensure highlights are updated after rendererPrimitives is repopulated
+    updateSelectedHighlights();
 
     statusPanel.innerText = `Render Complete!
 Draw Calls: ${drawCalls}
@@ -1291,6 +1400,17 @@ function drawPrimitive(cmd) {
     }
 
     let boundTex = false;
+    let primaryAddr = null;
+    const vcd_init = CPState.vcd[cmd.vat];
+    for (let i = 0; i < 8; i++) {
+        const hasTex = (i === 0 && vcd_init.Tex0) || (i === 1 && vcd_init.Tex1) || (i === 2 && vcd_init.Tex2) || (i === 3 && vcd_init.Tex3) ||
+                      (i === 4 && vcd_init.Tex4) || (i === 5 && vcd_init.Tex5) || (i === 6 && vcd_init.Tex6) || (i === 7 && vcd_init.Tex7);
+        if (hasTex) {
+            primaryAddr = BPState.textures[i].imageBase.toString(16).toUpperCase();
+            boundTex = true;
+            break;
+        }
+    }
     if (vcd.Tex0 && BPState.textures[0].webglTexture) {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, BPState.textures[0].webglTexture);
@@ -1470,7 +1590,6 @@ function drawPrimitive(cmd) {
         }
 
         // Resolve ModelView Matrix Index (Already resolved at start of loop)
-
         // Apply CPState XF ModelView Matrix (3x4 Matrix stored continuously)
         // GX Matrix indices in the vertex or MATINDEX are vector offsets.
         // Each vector is 4 floats. Matrix N is at vector 3*N.
@@ -1544,15 +1663,35 @@ function drawPrimitive(cmd) {
     // Store primitive for selection
     if (boundTex) {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const pm = XFState.projectionMatrix;
+        const vp = XFState.viewport;
+
         for (let i = 0; i < positions.length; i += 3) {
-            minX = Math.min(minX, positions[i]);
-            minY = Math.min(minY, positions[i+1]);
-            maxX = Math.max(maxX, positions[i]);
-            maxY = Math.max(maxY, positions[i+1]);
+            const x = positions[i];
+            const y = positions[i+1];
+            const z = positions[i+2];
+
+            // Project: ClipSpace = Projection * ModelViewPos
+            const cx = pm[0] * x + pm[4] * y + pm[8] * z + pm[12];
+            const cy = pm[1] * x + pm[5] * y + pm[9] * z + pm[13];
+            const cw = pm[3] * x + pm[7] * y + pm[11] * z + pm[15];
+
+            // Perspective Divide & Viewport Transform
+            const ndcX = cx / (cw || 1);
+            const ndcY = cy / (cw || 1);
+
+            // Screen Coord (Viewport: ScaleX, -ScaleY, OffsetX, OffsetY)
+            const sx = ndcX * vp.wd + vp.xOrig;
+            const sy = ndcY * (-vp.ht) + vp.yOrig;
+
+            minX = Math.min(minX, sx);
+            minY = Math.min(minY, sy);
+            maxX = Math.max(maxX, sx);
+            maxY = Math.max(maxY, sy);
         }
         rendererPrimitives.push({
             bbox: [minX, minY, maxX, maxY],
-            addr: BPState.textures[0].imageBase.toString(16).toUpperCase()
+            addr: primaryAddr
         });
     }
 
