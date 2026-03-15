@@ -441,8 +441,23 @@ function addTextureToInspector(unitIndex, rgba8) {
             <div class="texture-meta">Res: ${tex.width} x ${tex.height}</div>
             <div class="texture-meta">Format: ${formatName}</div>
             <div class="texture-meta">Last Unit: ${unitIndex}</div>
+            <button class="copy-btn" id="copy-${addrHex}">Copy Info</button>
         </div>
     `;
+
+    document.getElementById(`copy-${addrHex}`).addEventListener('click', () => {
+        const text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = document.getElementById(`copy-${addrHex}`);
+            const oldText = btn.innerText;
+            btn.innerText = 'Copied!';
+            btn.classList.add('success');
+            setTimeout(() => {
+                btn.innerText = oldText;
+                btn.classList.remove('success');
+            }, 2000);
+        });
+    });
 }
 
 class BPTextureUnit {
