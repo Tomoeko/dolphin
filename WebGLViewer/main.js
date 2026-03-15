@@ -15,22 +15,56 @@ const refImgStatus = document.getElementById('refImgStatus');
 const overlayLayer = document.getElementById('overlayLayer');
 const logAlignmentsBtn = document.getElementById('logAlignments');
 const comparisonContainer = document.getElementById('comparisonContainer');
+const comparisonViewWrapper = document.getElementById('comparisonViewWrapper');
 const resetZoomBtn = document.getElementById('resetZoom');
 const coordReadout = document.getElementById('coordReadout');
 const pixelColorReadout = document.getElementById('pixelColor');
 
 let currentZoom = 1.0;
+let currentPanX = 0;
+let currentPanY = 0;
+let isPanning = false;
+let startX, startY;
+
+function updateTransform() {
+    comparisonViewWrapper.style.transform = `translate(${currentPanX}px, ${currentPanY}px) scale(${currentZoom})`;
+}
 
 comparisonContainer.addEventListener('wheel', (e) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
     currentZoom = Math.min(Math.max(0.2, currentZoom + delta), 10.0);
-    comparisonContainer.style.transform = `scale(${currentZoom})`;
+    updateTransform();
 }, { passive: false });
+
+// Panning Implementation
+comparisonContent.addEventListener('mousedown', (e) => {
+    // Only pan if we click the container or image, not an overlay
+    if (e.target === comparisonContainer || e.target === referenceImg || e.target === overlayLayer || e.target === comparisonContent) {
+        isPanning = true;
+        startX = e.clientX - currentPanX;
+        startY = e.clientY - currentPanY;
+        comparisonContent.style.cursor = 'grabbing';
+    }
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (!isPanning) return;
+    currentPanX = e.clientX - startX;
+    currentPanY = e.clientY - startY;
+    updateTransform();
+});
+
+window.addEventListener('mouseup', () => {
+    isPanning = false;
+    comparisonContent.style.cursor = '';
+});
 
 resetZoomBtn.addEventListener('click', () => {
     currentZoom = 1.0;
-    comparisonContainer.style.transform = `scale(1.0)`;
+    currentPanX = 0;
+    currentPanY = 0;
+    updateTransform();
 });
 
 logAlignmentsBtn.addEventListener('click', () => {
