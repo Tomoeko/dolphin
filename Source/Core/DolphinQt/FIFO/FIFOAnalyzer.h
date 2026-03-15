@@ -20,16 +20,14 @@ class QSplitter;
 class QTextBrowser;
 class QTreeWidget;
 
-class FIFOAnalyzer final : public QWidget
-{
+class FIFOAnalyzer final : public QWidget {
   Q_OBJECT
 
 public:
-  explicit FIFOAnalyzer(FifoPlayer& fifo_player);
+  explicit FIFOAnalyzer(FifoPlayer &fifo_player);
   ~FIFOAnalyzer() override;
 
   void Update();
-  void ExportSceneTo(const QString& dir, bool headless = false);
 
 private:
   void CreateWidgets();
@@ -38,8 +36,6 @@ private:
   void BeginSearch();
   void FindNext();
   void FindPrevious();
-  void ExportAll();
-  void ExportScene();
 
   void ShowSearchResult(size_t index);
 
@@ -47,40 +43,36 @@ private:
   void UpdateDetails();
   void UpdateDescription();
 
-  void OnDebugFontChanged(const QFont& font);
+  void OnDebugFontChanged(const QFont &font);
 
-  FifoPlayer& m_fifo_player;
+  FifoPlayer &m_fifo_player;
 
-  QTreeWidget* m_tree_widget;
-  QListWidget* m_detail_list;
-  QTextBrowser* m_entry_detail_browser;
-  QSplitter* m_object_splitter;
+  QTreeWidget *m_tree_widget;
+  QListWidget *m_detail_list;
+  QTextBrowser *m_entry_detail_browser;
+  QSplitter *m_object_splitter;
 
   // Search
-  QGroupBox* m_search_box;
-  QLineEdit* m_search_edit;
-  QPushButton* m_search_new;
-  QPushButton* m_search_next;
-  QPushButton* m_search_previous;
-  QPushButton* m_export_all;
-  QPushButton* m_export_scene;
-  QLabel* m_search_label;
-  QSplitter* m_search_splitter;
+  QGroupBox *m_search_box;
+  QLineEdit *m_search_edit;
+  QPushButton *m_search_new;
+  QPushButton *m_search_next;
+  QPushButton *m_search_previous;
+  QLabel *m_search_label;
+  QSplitter *m_search_splitter;
 
-  struct SearchResult
-  {
+  struct SearchResult {
     constexpr SearchResult(u32 frame, u32 object_idx, u32 cmd)
-        : m_frame(frame), m_object_idx(object_idx), m_cmd(cmd)
-    {
-    }
+        : m_frame(frame), m_object_idx(object_idx), m_cmd(cmd) {}
     const u32 m_frame;
-    // Index in tree view.  Does not correspond with object numbers or part numbers.
+    // Index in tree view.  Does not correspond with object numbers or part
+    // numbers.
     const u32 m_object_idx;
     const u32 m_cmd;
   };
 
-  // Offsets from the start of the first part in an object for each command within the currently
-  // selected object.
+  // Offsets from the start of the first part in an object for each command
+  // within the currently selected object.
   std::vector<int> m_object_data_offsets;
 
   std::vector<SearchResult> m_search_results;

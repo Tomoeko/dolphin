@@ -25,14 +25,10 @@
 #include "Common/ScopeGuard.h"
 #include "Common/StringUtil.h"
 
-#include "Core/Config/GraphicsSettings.h"
-#include "Core/ConfigManager.h"
+#include "Core/Boot/Boot.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
-#include "FIFO/FIFOAnalyzer.h"
-#include "Core/HW/AddressSpace.h"
-#include "Core/HW/Memmap.h"
-#include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/System.h"
 
 #include "DolphinQt/Host.h"
@@ -45,7 +41,6 @@
 #endif
 #include "DolphinQt/Resources.h"
 #include "DolphinQt/Settings.h"
-#include "DolphinQt/FIFO/FIFOAnalyzer.h"
 #include "DolphinQt/Translation.h"
 #include "DolphinQt/Updater.h"
 
@@ -264,42 +259,6 @@ int main(int argc, char* argv[])
 
     Settings::Instance().InitDefaultPalette();
     Settings::Instance().ApplyStyle();
-
-    if (options.is_set("export_fifo"))
-    {
-      std::string export_dir = static_cast<const char*>(options.get("export_fifo"));
-      if (!boot || !std::holds_alternative<BootParameters::DFF>(boot->parameters))
-      {
-        ModalMessageBox::critical(nullptr, QObject::tr("Error"),
-                                  QObject::tr("--export-fifo requires a .dff file via --exec."));
-        return 1;
-      }
-
-      Core::System& system = Core::System::GetInstance();
-
-      SConfig::GetInstance().SetPathsAndGameMetadata(system, *boot);
-
-      system.Initialize();
-      system.GetMemory().Init();
-      AddressSpace::Init();
-
-      auto& dff = std::get<BootParameters::DFF>(boot->parameters);
-
-      if (!system.GetFifoPlayer().Open(dff.dff_path))
-      {
-        ModalMessageBox::critical(nullptr, QObject::tr("Error"),
-                                  QObject::tr("Failed to open FIFO file."));
-        return 1;
-      }
-
-      FIFOAnalyzer analyzer(system.GetFifoPlayer());
-      analyzer.ExportSceneTo(QString::fromStdString(export_dir), true);
-
-      AddressSpace::Shutdown();
-      system.GetMemory().Shutdown();
-
-      return 0;
-    }
 
     MainWindow win{Core::System::GetInstance(), std::move(boot),
                    static_cast<const char*>(options.get("movie"))};
