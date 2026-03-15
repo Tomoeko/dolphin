@@ -331,12 +331,12 @@ const FORMAT_NAMES = {
 };
 
 // Basic Shaders
-const vertexShaderSource = `
-    attribute vec4 aVertexPosition;
-    attribute vec4 aVertexColor;
-    attribute vec2 aVertexTexCoord;
-    varying lowp vec4 vColor;
-    varying highp vec2 vTexCoord;
+const vertexShaderSource = `#version 300 es
+    in vec4 aVertexPosition;
+    in vec4 aVertexColor;
+    in vec2 aVertexTexCoord;
+    out lowp vec4 vColor;
+    out highp vec2 vTexCoord;
     
     uniform mat4 uModelViewMatrix;
     uniform mat4 uProjectionMatrix;
@@ -350,39 +350,52 @@ const vertexShaderSource = `
     }
 `;
 
-const fragmentShaderSource = `
+const fragmentShaderSource = `#version 300 es
     precision mediump float;
-    varying lowp vec4 vColor;
-    varying highp vec2 vTexCoord;
+    in lowp vec4 vColor;
+    in highp vec2 vTexCoord;
     uniform sampler2D uSampler;
     uniform int uHasTexture;
-    uniform int uAlphaTest; // bits 0-2 compare func, bits 3-5 ref
-    uniform float uAlphaRef;
+    uniform vec4 uMatColor;
+    uniform int uAlphaTest; // bits 0-2 comp0, 3-5 comp1, 6-7 logic
+    uniform vec2 uAlphaRef; // x=ref0, y=ref1
+
+    out vec4 outColor;
+
+    bool alphaCompare(int func, float a, float ref) {
+        if (func == 0) return false;
+        if (func == 1) return (a < ref);
+        if (func == 2) return (a == ref);
+        if (func == 3) return (a <= ref);
+        if (func == 4) return (a > ref);
+        if (func == 5) return (a != ref);
+        if (func == 6) return (a >= ref);
+        if (func == 7) return true;
+        return true;
+    }
 
     void main() {
-        vec4 color;
-        if (uHasTexture == 1) {
-            color = vColor * texture2D(uSampler, vTexCoord);
-        } else {
-            color = vColor;
-        }
+        vec4 texColor = (uHasTexture == 1) ? texture(uSampler, vTexCoord) : vec4(1.0);
+        vec4 color = vColor * uMatColor * texColor;
 
         if (uAlphaTest != 0) {
-            // Simple Alpha Test: 0=Never, 1=Less, 2=Equal, 3=LEqual, 4=Greater, 5=NEqual, 6=GEqual, 7=Always
+            int comp0 = uAlphaTest & 7;
+            int comp1 = (uAlphaTest >> 3) & 7;
+            int op = (uAlphaTest >> 6) & 3;
+
+            bool p0 = alphaCompare(comp0, color.a, uAlphaRef.x);
+            bool p1 = alphaCompare(comp1, color.a, uAlphaRef.y);
             bool pass = true;
-            if (uAlphaTest == 0) pass = false;
-            else if (uAlphaTest == 1) pass = (color.a < uAlphaRef);
-            else if (uAlphaTest == 2) pass = (color.a == uAlphaRef);
-            else if (uAlphaTest == 3) pass = (color.a <= uAlphaRef);
-            else if (uAlphaTest == 4) pass = (color.a > uAlphaRef);
-            else if (uAlphaTest == 5) pass = (color.a != uAlphaRef);
-            else if (uAlphaTest == 6) pass = (color.a >= uAlphaRef);
-            else if (uAlphaTest == 7) pass = true;
-            
+
+            if (op == 0) pass = (p0 && p1);
+            else if (op == 1) pass = (p0 || p1);
+            else if (op == 2) pass = (p0 != p1);
+            else if (op == 3) pass = (p0 == p1);
+
             if (!pass) discard;
         }
 
-        gl_FragColor = color;
+        outColor = color;
     }
 `;
 
@@ -413,8 +426,9 @@ const programInfo = {
     uniformLocations: {
         projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
         modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
-        alphaTest: gl.getUniformLocation(shaderProgram, 'uAlphaTest'),
-        alphaRef: gl.getUniformLocation(shaderProgram, 'uAlphaRef'),
+        uAlphaTest: gl.getUniformLocation(shaderProgram, 'uAlphaTest'),
+        uAlphaRef: gl.getUniformLocation(shaderProgram, 'uAlphaRef'),
+        uMatColor: gl.getUniformLocation(shaderProgram, 'uMatColor'),
     },
 };
 
@@ -505,6 +519,22 @@ class VATGroup {
     }
 }
 
+class MatrixIndexA {
+    constructor() { this.Hex = 0; }
+    get PosNormalMtxIdx() { return this.Hex & 0x3F; }
+    get Tex0MtxIdx() { return (this.Hex >> 6) & 0x3F; }
+    get Tex1MtxIdx() { return (this.Hex >> 12) & 0x3F; }
+    get Tex2MtxIdx() { return (this.Hex >> 18) & 0x3F; }
+    get Tex3MtxIdx() { return (this.Hex >> 24) & 0x3F; }
+}
+class MatrixIndexB {
+    constructor() { this.Hex = 0; }
+    get Tex4MtxIdx() { return this.Hex & 0x3F; }
+    get Tex5MtxIdx() { return (this.Hex >> 6) & 0x3F; }
+    get Tex6MtxIdx() { return (this.Hex >> 12) & 0x3F; }
+    get Tex7MtxIdx() { return (this.Hex >> 18) & 0x3F; }
+}
+
 class VCD {
     constructor() {
         this.PMIdx = 0; this.T0MIdx = 0; this.T1MIdx = 0; this.T2MIdx = 0;
@@ -547,22 +577,119 @@ class VCD {
     }
 }
 
+// XF State and Command Handling
+const floatValueHelper = new Float32Array(1);
+const uintValueHelper = new Uint32Array(floatValueHelper.buffer);
+function u32ToFloat(val) {
+    uintValueHelper[0] = val;
+    return floatValueHelper[0];
+}
+
 class XFMemory {
     constructor() {
-        this.posMatrices = new Float32Array(1024); // Support full 64 matrices + overhead
+        this.posMatrices = new Float32Array(1024); // Support full matrix range
         this.projectionMatrix = mat4.create();
-        this.viewport = { wd: 320, ht: 180, xOrig: 320, yOrig: 180 }; // Default 640x360 center
-        this.projectionType = 1; // 0=Persp, 1=Ortho
-        mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000); // Default
+        this.viewport = { wd: 320, ht: 180, xOrig: 320, yOrig: 180 }; 
+        this.projectionType = 1; 
+        this.projectionBuffer = new Uint32Array(7); // Fixed buffer for projection
+        // Wii Center-Origin Fallback: 640x480 centered
+        mat4.ortho(this.projectionMatrix, -320, 320, 240, -240, -1024, 1024); 
     }
     reset() {
         this.posMatrices.fill(0);
-        this.viewport = { wd: 320, ht: 180, xOrig: 320, yOrig: 180 };
+        this.projectionBuffer.fill(0);
+        this.viewport = { wd: 320, ht: 240, xOrig: 320, yOrig: 240 };
         this.projectionType = 1;
-        mat4.ortho(this.projectionMatrix, 0, 640, 360, 0, -1000, 1000);
+        mat4.ortho(this.projectionMatrix, -320, 320, -240, 240, -1024, 1024);
     }
 }
 const XFState = new XFMemory();
+
+// BP State logic below
+
+function applyXFCommand(address, count, data) {
+    for (let i = 0; i < count; i++) {
+        const addr = address + i;
+        const val = data[i];
+
+        if (addr >= 0x00 && addr < 0x400) { // Full pos/normal matrix range
+            XFState.posMatrices[addr] = u32ToFloat(val);
+        } else if (addr === 0x1018) { // SETMATRIXINDA
+            if (CPState.matrix_index_a) CPState.matrix_index_a.Hex = val;
+        } else if (addr === 0x1019) { // SETMATRIXINDB
+            if (CPState.matrix_index_b) CPState.matrix_index_b.Hex = val;
+        } else if (addr >= 0x101A && addr <= 0x101F) {
+            // Viewport (6 floats: scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ)
+            const off = addr - 0x101A;
+            const fval = u32ToFloat(val);
+            if (off === 0) XFState.viewport.wd = fval;
+            else if (off === 1) XFState.viewport.ht = fval;
+            else if (off === 3) XFState.viewport.xOrig = fval;
+            else if (off === 4) XFState.viewport.yOrig = fval;
+        } else if (addr >= 0x1020 && addr <= 0x1026) { 
+            XFState.projectionBuffer[addr - 0x1020] = val;
+            // Apply whenever we write to the range
+            const uview = XFState.projectionBuffer;
+            const fview = new Float32Array(uview.buffer);
+            const type = uview[6]; 
+            XFState.projectionType = type;
+            const pm = XFState.projectionMatrix;
+
+            if (type === 0) { // Perspective
+                // The projection matrix is a 4x4 matrix.
+                // The XF stores it as 6 floats:
+                // f0 = 2N / (R-L)
+                // f1 = (R+L) / (R-L)
+                // f2 = 2N / (T-B)
+                // f3 = (T+B) / (T-B)
+                // f4 = -(F+N) / (F-N)
+                // f5 = -2FN / (F-N)
+                // Where N, F, L, R, T, B are near, far, left, right, top, bottom clip planes.
+                // The matrix is:
+                // [ f0  0  f1  0 ]
+                // [ 0  f2  f3  0 ]
+                // [ 0   0  f4 f5 ]
+                // [ 0   0  -1  0 ]
+                pm[0] = fview[0]; pm[4] = 0;        pm[8] = fview[1]; pm[12] = 0;
+                pm[1] = 0;        pm[5] = fview[2]; pm[9] = fview[3]; pm[13] = 0;
+                pm[2] = 0;        pm[6] = 0;        pm[10] = fview[4]; pm[14] = fview[5];
+                pm[3] = 0;        pm[7] = 0;        pm[11] = -1;      pm[15] = 0;
+            } else { // Ortho
+                // The projection matrix is a 4x4 matrix.
+                // The XF stores it as 6 floats:
+                // f0 = 2 / (R-L)
+                // f1 = -(R+L) / (R-L)
+                // f2 = 2 / (T-B)
+                // f3 = -(T+B) / (T-B)
+                // f4 = -2 / (F-N)
+                // f5 = -(F+N) / (F-N)
+                // The matrix is:
+                // [ f0  0   0  f1 ]
+                // [ 0  f2   0  f3 ]
+                // [ 0   0  f4  f5 ]
+                // [ 0   0   0   1 ]
+                pm[0] = fview[0]; pm[4] = 0;        pm[8] = 0;        pm[12] = fview[1];
+                pm[1] = 0;        pm[5] = fview[2]; pm[9] = 0;        pm[13] = fview[3];
+                pm[2] = 0;        pm[6] = 0;        pm[10] = fview[4]; pm[14] = fview[5];
+                pm[3] = 0;        pm[7] = 0;        pm[11] = 0;       pm[15] = 1;
+            }
+        } else if (addr === 0x100C || addr === 0x100D) { // MATCOLOR
+            const idx = addr - 0x100C;
+            const mat = BPState.matColors[idx];
+            mat[0] = ((val >> 24) & 0xFF) / 255.0;
+            mat[1] = ((val >> 16) & 0xFF) / 255.0;
+            mat[2] = ((val >> 8) & 0xFF) / 255.0;
+            mat[3] = (val & 0xFF) / 255.0;
+        } else if (addr === 0x100A || addr === 0x100B) { // AMBCOLOR
+            const idx = addr - 0x100A;
+            const amb = BPState.ambColors[idx];
+            amb[0] = ((val >> 24) & 0xFF) / 255.0;
+            amb[1] = ((val >> 16) & 0xFF) / 255.0;
+            amb[2] = ((val >> 8) & 0xFF) / 255.0;
+            amb[3] = (val & 0xFF) / 255.0;
+        }
+    }
+}
 
 // Texture Decoder Engine
 const TexDecoder = {
@@ -588,20 +715,41 @@ const TexDecoder = {
         return blocksX * blocksY * this.getBytesPerBlock(format);
     },
     getMemoryChunk: function(address, size) {
-        if (!memData) return null; // memData must be loaded
+        if (!memData) return null;
+        
+        // Optimistic path: same as before but less logs
         for (const update of memUpdates) {
-            // Check if address is within this update chunk
             if (address >= update.address && address < update.address + update.size) {
                 const offsetInChunk = address - update.address;
                 const available = update.size - offsetInChunk;
-                const readSize = Math.min(size, available);
-                if (readSize < size) {
-                    console.warn(`Texture spans multiple chunks or is truncated. Need ${size}, got ${readSize}.`);
+                if (available >= size) {
+                    return new Uint8Array(memData, update.offset + offsetInChunk, size);
                 }
-                return new Uint8Array(memData, update.offset + offsetInChunk, readSize);
             }
         }
-        // console.warn(`Memory chunk not found for address 0x${address.toString(16)}!`);
+
+        // Spanning path: assemble from multiple chunks
+        const buf = new Uint8Array(size);
+        let filled = 0;
+        let success = false;
+        while (filled < size) {
+            let foundChunk = false;
+            const target = address + filled;
+            for (const update of memUpdates) {
+                if (target >= update.address && target < update.address + update.size) {
+                    const offset = target - update.address;
+                    const canRead = Math.min(size - filled, update.size - offset);
+                    buf.set(new Uint8Array(memData, update.offset + offset, canRead), filled);
+                    filled += canRead;
+                    foundChunk = true;
+                    success = true;
+                    break;
+                }
+            }
+            if (!foundChunk) break; 
+        }
+
+        if (success) return buf;
         return null;
     },
 
@@ -1178,20 +1326,39 @@ class BPTextureUnit {
         this.imageBase = 0;
         this.dirty = false;
     }
+    setImage0(val) {
+        this.width = (val & 0x3FF) + 1;
+        this.height = ((val >> 10) & 0x3FF) + 1;
+        this.format = (val >> 20) & 0xF;
+        this.dirty = true;
+    }
+    setImage3(val) {
+        this.imageBase = (val & 0xFFFFFF) << 5;
+        this.dirty = true;
+    }
+    // Placeholder for other texture commands if needed
+    setMode0(val) {}
+    setMode1(val) {}
+    setImage1(val) {}
+    setImage2(val) {}
 }
 
 class BPMemory {
     constructor() {
         this.textures = Array(8).fill(null).map(() => new BPTextureUnit());
         this.zMode = 0;
-        this.alphaTest = 0;
-        this.blendMode = 0;
+        this.alphaTest = 0x3F; // Default to ALWAYS/ALWAYS pass
+        this.blendMode = 0; // Default to Disabled
+        this.matColors = [new Float32Array([1,1,1,1]), new Float32Array([1,1,1,1])];
+        this.ambColors = [new Float32Array([1,1,1,1]), new Float32Array([1,1,1,1])];
     }
     reset() {
         this.textures.forEach(t => t.reset());
         this.zMode = 0;
-        this.alphaTest = 0;
+        this.alphaTest = 0x3F;
         this.blendMode = 0;
+        this.matColors.forEach(c => c.set([1,1,1,1]));
+        this.ambColors.forEach(c => c.set([1,1,1,1]));
     }
 }
 const BPState = new BPMemory();
@@ -1200,11 +1367,15 @@ class CPStateTracker {
     constructor() {
         this.vat = Array(8).fill(null).map(() => new VATGroup());
         this.vcd = Array(8).fill(null).map(() => new VCD());
-        this.matIdxA = 0; 
+        this.matrix_index_a = { Hex: 0 };
+        this.matrix_index_b = { Hex: 0 };
+        this.matIdxA = 0;
     }
     reset() {
         this.vat.forEach(v => v.reset());
         this.vcd.forEach(v => v.reset());
+        if (this.matrix_index_a) this.matrix_index_a.Hex = 0;
+        if (this.matrix_index_b) this.matrix_index_b.Hex = 0;
         this.matIdxA = 0;
     }
 }
@@ -1277,78 +1448,40 @@ function applyCPCommand(cmd, val) {
         CPState.matIdxA = val;
     }
 }
-function applyXFCommand(addr, count, data) {
-    const intView = new Uint32Array(data);
-    const floatView = new Float32Array(intView.buffer);
-    
-    // PosMatrices are at float-based offsets in our JSON stream
-    if (addr < 0x1000) { 
-        if (addr + count <= 1024) {
-            for(let i=0; i<count; i++) {
-                XFState.posMatrices[addr + i] = floatView[i];
-            }
-        }
-    } 
-    // Viewport is at 0x101a (6 floats: wd, ht, zRange, xOrig, yOrig, farZ)
-    else if (addr >= 0x101a && addr <= 0x101f) {
-        const offset = addr - 0x101a;
-        if (offset === 0) XFState.viewport.wd = floatView[0];
-        if (offset <= 1 && offset + floatView.length > 1) XFState.viewport.ht = floatView[1 - offset];
-        if (offset <= 3 && offset + floatView.length > 3) XFState.viewport.xOrig = floatView[3 - offset];
-        if (offset <= 4 && offset + floatView.length > 4) XFState.viewport.yOrig = floatView[4 - offset];
-    }
-    // Projection Matrix is at 0x1020 (6 floats + Type at 0x1026)
-    else if (addr >= 0x1020 && addr <= 0x1026) {
-        const offset = addr - 0x1020;
-        if (offset + floatView.length > 6) {
-            const type = intView[6 - offset]; // READ AS INT!
-            XFState.projectionType = type;
-            const p = floatView;
-            if (p.length >= 6) {
-                const pm = XFState.projectionMatrix;
-                if (type === 1) { // Ortho (p0=X scale, p1=X trans, p2=Y scale, p3=Y trans, p4=Z scale, p5=Z trans)
-                    pm[0] = p[0]; pm[4] = 0;    pm[8] =  0;   pm[12] = p[1];
-                    pm[1] = 0;    pm[5] = p[2]; pm[9] =  0;   pm[13] = p[3];
-                    pm[2] = 0;    pm[6] = 0;    pm[10] = p[4];pm[14] = p[5];
-                    pm[3] = 0;    pm[7] = 0;    pm[11] = 0;   pm[15] = 1;
-                } else if (type === 0) { // Persp (p0=X scale, p1=X trans, p2=Y scale, p3=Y trans, p4=Z scale, p5=Z trans)
-                    pm[0] = p[0]; pm[4] = 0;    pm[8] =  p[1]; pm[12] = 0;
-                    pm[1] = 0;    pm[5] = p[2]; pm[9] =  p[3]; pm[13] = 0;
-                    pm[2] = 0;    pm[6] = 0;    pm[10] = p[4]; pm[14] = p[5];
-                    pm[3] = 0;    pm[7] = 0;    pm[11] = -1;   pm[15] = 0;
-                }
-            }
-        }
-    }
-}
 
 
-function applyBPCommand(cmd, val) {
-    if (cmd >= 0x88 && cmd <= 0x8B) { // TX_SETIMAGE0 (Tex0-Tex3)
-        const unit = cmd - 0x88;
-        BPState.textures[unit].width = (val & 0x3FF) + 1;
-        BPState.textures[unit].height = ((val >> 10) & 0x3FF) + 1;
-        BPState.textures[unit].format = (val >> 20) & 0xF;
-        BPState.textures[unit].dirty = true;
-    } else if (cmd >= 0xA8 && cmd <= 0xAB) { // TX_SETIMAGE0 (Tex4-Tex7)
-        const unit = (cmd - 0xA8) + 4;
-        BPState.textures[unit].width = (val & 0x3FF) + 1;
-        BPState.textures[unit].height = ((val >> 10) & 0x3FF) + 1;
-        BPState.textures[unit].format = (val >> 20) & 0xF;
-        BPState.textures[unit].dirty = true;
-    } else if (cmd >= 0x94 && cmd <= 0x97) { // TX_SETIMAGE3 (Tex0-Tex3)
-        const unit = cmd - 0x94;
-        BPState.textures[unit].imageBase = (val & 0xFFFFFF) << 5;
-        BPState.textures[unit].dirty = true;
-    } else if (cmd >= 0xB4 && cmd <= 0xB7) { // TX_SETIMAGE3 (Tex4-Tex7)
-        const unit = (cmd - 0xB4) + 4;
-        BPState.textures[unit].imageBase = (val & 0xFFFFFF) << 5;
-        BPState.textures[unit].dirty = true;
-    } else if (cmd === 0xF2) { // BLEND_MODE
-        BPState.blendMode = val;
-    } else if (cmd === 0xF3) { // Z_MODE
+function applyBPCommand(command, val) {
+    const cmd = command & 0xFF;
+    // Ranges for units 0-3 (0x80-0x97) and units 4-7 (0xA0-0xB7)
+    if (cmd >= 0x80 && cmd < 0x84) { // TX_SETMODE0 (0-3)
+        BPState.textures[cmd - 0x80].setMode0(val);
+    } else if (cmd >= 0xA0 && cmd < 0xA4) { // TX_SETMODE0 (4-7)
+        BPState.textures[cmd - 0xA0 + 4].setMode0(val);
+    } else if (cmd >= 0x84 && cmd < 0x88) { // TX_SETMODE1 (0-3)
+        BPState.textures[cmd - 0x84].setMode1(val);
+    } else if (cmd >= 0xA4 && cmd < 0xA8) { // TX_SETMODE1 (4-7)
+        BPState.textures[cmd - 0xA4 + 4].setMode1(val);
+    } else if (cmd >= 0x88 && cmd < 0x8C) { // TX_SETIMAGE0 (0-3)
+        BPState.textures[cmd - 0x88].setImage0(val);
+    } else if (cmd >= 0xA8 && cmd < 0xAC) { // TX_SETIMAGE0 (4-7)
+        BPState.textures[cmd - 0xA8 + 4].setImage0(val);
+    } else if (cmd >= 0x8C && cmd < 0x90) { // TX_SETIMAGE1 (0-3)
+        BPState.textures[cmd - 0x8C].setImage1(val);
+    } else if (cmd >= 0xAC && cmd < 0xB0) { // TX_SETIMAGE1 (4-7)
+        BPState.textures[cmd - 0xAC + 4].setImage1(val);
+    } else if (cmd >= 0x90 && cmd < 0x94) { // TX_SETIMAGE2 (0-3)
+        BPState.textures[cmd - 0x90].setImage2(val);
+    } else if (cmd >= 0xB0 && cmd < 0xB4) { // TX_SETIMAGE2 (4-7)
+        BPState.textures[cmd - 0xB0 + 4].setImage2(val);
+    } else if (cmd >= 0x94 && cmd < 0x98) { // TX_SETIMAGE3 (0-3)
+        BPState.textures[cmd - 0x94].setImage3(val);
+    } else if (cmd >= 0xB4 && cmd < 0xB8) { // TX_SETIMAGE3 (4-7)
+        BPState.textures[cmd - 0xB4 + 4].setImage3(val);
+    } else if (cmd === 0x40) { // Z_MODE
         BPState.zMode = val;
-    } else if (cmd === 0xF4) { // ALPHA_TEST
+    } else if (cmd === 0x41) { // BLEND_MODE
+        BPState.blendMode = val;
+    } else if (cmd === 0xF3) { // ALPHA_TEST
         BPState.alphaTest = val;
     }
 }
@@ -1479,6 +1612,16 @@ function drawPrimitive(cmd) {
     const uSampler = gl.getUniformLocation(shaderProgram, 'uSampler');
     gl.uniform1i(uSampler, 0);
 
+    // Apply Material Color (Usually MatColor0)
+    gl.uniform4fv(programInfo.uniformLocations.uMatColor, BPState.matColors[0]);
+
+    // Apply Alpha Test (Full dual-test logic)
+    const at = BPState.alphaTest;
+    gl.uniform1i(programInfo.uniformLocations.uAlphaTest, at & 0xFF); // Passes Comp0, Comp1, and Op
+    gl.uniform2f(programInfo.uniformLocations.uAlphaRef, 
+        ((at >> 8) & 0xFF) / 255.0, 
+        ((at >> 16) & 0xFF) / 255.0);
+
     const vertexSize = cmd.vertex_size;
     const numVerts = cmd.num_vertices;
     const positions = [];
@@ -1486,8 +1629,10 @@ function drawPrimitive(cmd) {
     const texcoords = [];
 
     const dataView = new DataView(new Uint8Array(cmd.data).buffer);
-    // const vcd = CPState.vcd[cmd.vat]; // Already defined above
     const vat = CPState.vat[cmd.vat];
+    let posMatIdx = 0;
+    let mtxBase = 0;
+    let firstVertexRaw = { x:0, y:0, z:0 };
 
     // Helper to read a component
     function readComponent(offset, format, frac) {
@@ -1560,7 +1705,6 @@ function drawPrimitive(cmd) {
         let u=0, v=0;
 
         // Read Position Matrix Index (1 byte if enabled)
-        let posMatIdx = 0;
         if (vcd.PMIdx) {
             posMatIdx = dataView.getUint8(ptr);
             ptr += 1;
@@ -1587,25 +1731,46 @@ function drawPrimitive(cmd) {
                 const resZ = readComponent(ptr, vat.PosFormat, vat.PosFrac); ptr += resZ.size;
                 z = resZ.val;
             }
+            if (i === 0) firstVertexRaw = { x, y, z };
+        } else if (vcd.Position === 2) { // 8-bit Index
+            ptr += 1;
+        } else if (vcd.Position === 3) { // 16-bit Index
+            ptr += 2;
         }
 
         if (vcd.Normal === 1) { // Direct
             const elements = (vat.NormalElements === 0) ? 1 : 3;
-            for(let j=0; j<elements; j++) { // Normals have 3 components each
-                const res = readComponent(ptr, vat.NormalFormat, 0); ptr += res.size; 
-                const resY = readComponent(ptr, vat.NormalFormat, 0); ptr += resY.size; 
-                const resZ = readComponent(ptr, vat.NormalFormat, 0); ptr += resZ.size; 
+            for(let j=0; j<elements; j++) { // Normals have 3 components each (even if el=1, it consumes 3 for N, B, T maybe?)
+                // Usually GX normals are 3 components. If elements=0, it's just Normal.
+                const count = (vat.NormalElements === 0) ? 1 : 3;
+                for (let k=0; k<count; k++) {
+                    const resXN = readComponent(ptr, vat.NormalFormat, 0); ptr += resXN.size; 
+                    const resYN = readComponent(ptr, vat.NormalFormat, 0); ptr += resYN.size; 
+                    const resZN = readComponent(ptr, vat.NormalFormat, 0); ptr += resZN.size; 
+                }
             }
+        } else if (vcd.Normal === 2) { // 8-bit Index
+            ptr += 1;
+        } else if (vcd.Normal === 3) { // 16-bit Index
+            ptr += 2;
         }
 
         if (vcd.Color0 === 1) { // Direct
             const col = readColor(ptr, vat.Color0Comp);
             r = col.r; g = col.g; b = col.b; a = col.a;
             ptr += col.size;
+        } else if (vcd.Color0 === 2) { // 8-bit Index
+            ptr += 1;
+        } else if (vcd.Color0 === 3) { // 16-bit Index
+            ptr += 2;
         }
 
         if (vcd.Color1 === 1) { // Direct
             const col = readColor(ptr, vat.Color1Comp); ptr += col.size;
+        } else if (vcd.Color1 === 2) { // 8-bit Index
+            ptr += 1;
+        } else if (vcd.Color1 === 3) { // 16-bit Index
+            ptr += 2;
         }
 
         if (vcd.Tex0 === 1) { // Direct
@@ -1616,6 +1781,10 @@ function drawPrimitive(cmd) {
                 const resT = readComponent(ptr, vat.Tex0CoordFormat, vat.Tex0Frac); ptr += resT.size;
                 v = resT.val;
             }
+        } else if (vcd.Tex0 === 2) { // 8-bit Index
+            ptr += 1;
+        } else if (vcd.Tex0 === 3) { // 16-bit Index
+            ptr += 2;
         }
         
         // Skip Tex1-7
@@ -1637,22 +1806,37 @@ function drawPrimitive(cmd) {
                 if (elements === 2) {
                     const resT = readComponent(ptr, texVATs[j].fmt, texVATs[j].frac); ptr += resT.size;
                 }
+            } else if (texVCDs[j] === 2) { // 8-bit Index
+                ptr += 1;
+            } else if (texVCDs[j] === 3) { // 16-bit Index
+                ptr += 2;
             }
         }
 
-        // Resolve ModelView Matrix Index (Already resolved at start of loop)
         // Apply CPState XF ModelView Matrix (3x4 Matrix stored continuously)
-        // GX Matrix indices in the vertex or MATINDEX are vector offsets.
-        // Each vector is 4 floats. Matrix N is at vector 3*N.
-        const mtxBase = posMatIdx * 4;
-        const m00 = XFState.posMatrices[mtxBase + 0], m01 = XFState.posMatrices[mtxBase + 1], m02 = XFState.posMatrices[mtxBase + 2], m03 = XFState.posMatrices[mtxBase + 3];
-        const m10 = XFState.posMatrices[mtxBase + 4], m11 = XFState.posMatrices[mtxBase + 5], m12 = XFState.posMatrices[mtxBase + 6], m13 = XFState.posMatrices[mtxBase + 7];
-        const m20 = XFState.posMatrices[mtxBase + 8], m21 = XFState.posMatrices[mtxBase + 9], m22 = XFState.posMatrices[mtxBase + 10],m23 = XFState.posMatrices[mtxBase + 11];
+        // Matrix N starts at word index 4*N.
+        mtxBase = posMatIdx * 4; 
+        if (mtxBase + 11 >= XFState.posMatrices.length) mtxBase = 0; // Bounds check
+
+        let m00 = XFState.posMatrices[mtxBase + 0], m01 = XFState.posMatrices[mtxBase + 1], m02 = XFState.posMatrices[mtxBase + 2], m03 = XFState.posMatrices[mtxBase + 3];
+        let m10 = XFState.posMatrices[mtxBase + 4], m11 = XFState.posMatrices[mtxBase + 5], m12 = XFState.posMatrices[mtxBase + 6], m13 = XFState.posMatrices[mtxBase + 7];
+        let m20 = XFState.posMatrices[mtxBase + 8], m21 = XFState.posMatrices[mtxBase + 9], m22 = XFState.posMatrices[mtxBase + 10], m23 = XFState.posMatrices[mtxBase + 11];
+
+        // Robust Identity Fallback: if matrix appears to be all zeros or uninitialized
+        const isZero = (Math.abs(m00) < 1e-6 && Math.abs(m11) < 1e-6 && Math.abs(m22) < 1e-6 && Math.abs(m01) < 1e-6);
+        if (isZero) {
+            m00 = 1; m11 = 1; m22 = 1; 
+            m01 = 0; m02 = 0; m03 = 0; m10 = 0; m12 = 0; m13 = 0; m20 = 0; m21 = 0; m23 = 0;
+        }
 
         // Perform the 3x4 * vec3 matrix multiplication
         const rx = m00 * x + m01 * y + m02 * z + m03;
         const ry = m10 * x + m11 * y + m12 * z + m13;
         const rz = m20 * x + m21 * y + m22 * z + m23;
+
+        if (i === 0 && drawCalls < 2) {
+            // Updated log to use variables in scope if needed, or just let the bottom one handle it
+        }
         
         positions.push(rx, ry, rz);
         colors.push(r, g, b, a);
@@ -1689,8 +1873,19 @@ function drawPrimitive(cmd) {
     // 6: LineStrip
     // 7: Points
     
-    // WebGL doesn't support Quads native, so we'll mock it 
-    // by using Triangle Fan or points for now.
+    const prim = cmd.primitive;
+    let glPrimitive = gl.TRIANGLES;
+    if (prim === 0 || prim === 1) glPrimitive = gl.TRIANGLE_FAN; // QUADS
+    else if (prim === 2) glPrimitive = gl.TRIANGLES;
+    else if (prim === 3) glPrimitive = gl.TRIANGLE_STRIP;
+    else if (prim === 4) glPrimitive = gl.TRIANGLE_FAN;
+    else if (prim === 5) glPrimitive = gl.LINES;
+    else if (prim === 6) glPrimitive = gl.LINE_STRIP;
+    else if (prim === 7) glPrimitive = gl.POINTS;
+
+    if (document.getElementById('wireframeToggle').checked) {
+        glPrimitive = (prim === 5 || prim === 6) ? gl.LINES : gl.LINE_STRIP;
+    }
     
     // Apply GX State (ZMode, BlendMode, AlphaTest)
     const zm = BPState.zMode;
@@ -1707,34 +1902,26 @@ function drawPrimitive(cmd) {
     if (bm & 1) {
         gl.enable(gl.BLEND);
         const factors = [gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA];
-        gl.blendFunc(factors[(bm >> 5) & 7], factors[(bm >> 2) & 7]);
+        // SrcFactor is bits 2-4, DstFactor is bits 5-7
+        gl.blendFunc(factors[(bm >> 2) & 7], factors[(bm >> 5) & 7]);
     } else {
         gl.disable(gl.BLEND);
     }
-
-    const at = BPState.alphaTest;
-    gl.uniform1i(programInfo.uniformLocations.alphaTest, at & 7);
-    gl.uniform1f(programInfo.uniformLocations.alphaRef, ((at >> 8) & 0xFF) / 255.0);
-
-    let glPrimitive = gl.TRIANGLE_FAN;
-    
-    if (isWireframe) {
-        glPrimitive = gl.LINE_STRIP;
-    } else {
-        switch (cmd.primitive) {
-            case 0: // Quads 
-            case 1: glPrimitive = gl.TRIANGLE_FAN; break; // Approximating quads
-            case 2: glPrimitive = gl.TRIANGLES; break;
-            case 3: glPrimitive = gl.TRIANGLE_STRIP; break;
-            case 4: glPrimitive = gl.TRIANGLE_FAN; break;
-            case 5: glPrimitive = gl.LINES; break;
-            case 6: glPrimitive = gl.LINE_STRIP; break;
-            case 7: glPrimitive = gl.POINTS; break;
-        }
-    }
-
+    gl.disable(gl.CULL_FACE); // Wii defaults to no culling or different winding
     gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, XFState.projectionMatrix);
+    gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, mat4.create()); // Identity for now
+
+    // Draw the primitive
     gl.drawArrays(glPrimitive, 0, numVerts);
+
+    // Diagnostics if everything is stacked
+    if (drawCalls < 2) {
+        console.log(`DrawCall ${drawCalls}: prim=${cmd.primitive}, verts=${numVerts}, mtxBase=${mtxBase}, posMatIdx=${posMatIdx}`);
+        console.log(`  RawV0: [${firstVertexRaw.x.toFixed(2)}, ${firstVertexRaw.y.toFixed(2)}, ${firstVertexRaw.z.toFixed(2)}]`);
+        console.log(`  Matrix[${mtxBase}]: [${XFState.posMatrices[mtxBase]}, ${XFState.posMatrices[mtxBase+1]}, ${XFState.posMatrices[mtxBase+2]}, ${XFState.posMatrices[mtxBase+3]}]`);
+        console.log(`  Matrix[0]: [${XFState.posMatrices[0]}, ${XFState.posMatrices[1]}, ${XFState.posMatrices[2]}, ${XFState.posMatrices[3]}]`);
+        console.log(`  FinalV0: [${positions[0].toFixed(2)}, ${positions[1].toFixed(2)}, ${positions[2].toFixed(2)}]`);
+    }
     
     // Store primitive for selection
     if (boundTex) {
@@ -1752,29 +1939,26 @@ function drawPrimitive(cmd) {
             const cy = pm[1] * x + pm[5] * y + pm[9] * z + pm[13];
             const cw = pm[3] * x + pm[7] * y + pm[11] * z + pm[15];
 
-            // Perspective Divide & Viewport Transform
-            const ndcX = cx / (cw || 1);
-            const ndcY = cy / (cw || 1);
-
-            // Screen Coord (Fixed to WebGL 640x360 canvas space + DOM Y-flip)
-            // ndcX = [-1, 1], ndcY = [-1, 1] (WebGL +Y is UP, DOM +Y is DOWN)
-            const sx = (ndcX * 0.5 + 0.5) * 640;
-            const sy = (-ndcY * 0.5 + 0.5) * 360;
-
-            minX = Math.min(minX, sx);
-            minY = Math.min(minY, sy);
-            maxX = Math.max(maxX, sx);
-            maxY = Math.max(maxY, sy);
+            if (cw !== 0) {
+                const ndcX = cx / cw;
+                const ndcY = cy / cw;
+                const px = (ndcX + 1.0) * 320;
+                const py = (1.0 - ndcY) * 180; // 0 at Top for selection mapping
+                minX = Math.min(minX, px); minY = Math.min(minY, py);
+                maxX = Math.max(maxX, px); maxY = Math.max(maxY, py);
+            }
         }
+        
         rendererPrimitives.push({
-            bbox: [minX, minY, maxX, maxY],
-            addr: primaryAddr,
             drawCallIndex: drawCalls,
+            bbox: [minX, minY, maxX, maxY],
+            texAddr: primaryAddr,
             states: {
-                zMode: zm,
-                blendMode: bm,
-                alphaTest: at,
-                texAddr: primaryAddr
+                zMode: BPState.zMode,
+                alphaTest: BPState.alphaTest,
+                blendMode: BPState.blendMode,
+                matColor0: Array.from(BPState.matColors[0]),
+                matColor1: Array.from(BPState.matColors[1])
             }
         });
     }
@@ -1830,26 +2014,35 @@ function updateStateInspector(p) {
     const at = p.states.alphaTest;
     const bm = p.states.blendMode;
     
-    // ZMode Decoding
+    // ZMode (Register 0x40)
     const zEnabled = (zm & 1) ? "ON" : "OFF";
     const zFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
     const zFunc = zFuncs[(zm >> 1) & 7];
-    const zWrite = (zm >> 4) & 1 ? "Write" : "Read-Only";
-    document.getElementById('valZMode').innerText = `${zEnabled} (${zFunc}, ${zWrite})`;
+    const zWrite = (zm >> 4) & 1 ? "W" : "R";
+    document.getElementById('valZMode').innerText = `0x${zm.toString(16)}: ${zEnabled} (${zFunc}, ${zWrite})`;
     
-    // Alpha Test Decoding
+    // Alpha Test (Register 0xF3)
     const atFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
-    const atFunc = atFuncs[at & 7];
-    const atRef = ((at >> 8) & 0xFF);
-    document.getElementById('valAlphaTest').innerText = `${atFunc} (Ref: ${atRef})`;
+    const atComp0 = atFuncs[at & 7];
+    const atComp1 = atFuncs[(at >> 3) & 7];
+    const atRef0 = ((at >> 8) & 0xFF);
+    const atRef1 = ((at >> 16) & 0xFF);
+    document.getElementById('valAlphaTest').innerText = `0x${at.toString(16)}: ${atComp0}/${atComp1} (Ref: ${atRef0}/${atRef1})`;
     
-    // Blend Mode Decoding
+    // Blend Mode (Register 0x41)
     const bEnabled = (bm & 1) ? "ON" : "OFF";
     const bFactors = ["ZERO", "ONE", "SRC_CLR", "INV_SRC_CLR", "SRC_ALPHA", "INV_SRC_ALPHA", "DST_ALPHA", "INV_DST_ALPHA"];
     const bSrc = bFactors[(bm >> 5) & 7];
     const bDst = bFactors[(bm >> 2) & 7];
-    document.getElementById('valBlend').innerText = `${bEnabled} (${bSrc} / ${bDst})`;
+    document.getElementById('valBlend').innerText = `0x${bm.toString(16)}: ${bEnabled} (${bSrc}/${bDst})`;
     
+    // MatColors (from XF)
+    const mc0 = p.states.matColor0 || [1,1,1,1];
+    const mc1 = p.states.matColor1 || [1,1,1,1];
+    const toHex = (c) => "#" + c.map(v => Math.round(v*255).toString(16).padStart(2, '0')).join('').substring(0,6).toUpperCase();
+    document.getElementById('valMatColor0').innerText = toHex(mc0);
+    document.getElementById('valMatColor1').innerText = toHex(mc1);
+
     document.getElementById('valTexture').innerText = `0x${p.states.texAddr || 'None'}`;
 }
 
@@ -1857,6 +2050,8 @@ function clearStateInspector() {
     document.getElementById('valZMode').innerText = "-";
     document.getElementById('valAlphaTest').innerText = "-";
     document.getElementById('valBlend').innerText = "-";
+    document.getElementById('valMatColor0').innerText = "-";
+    document.getElementById('valMatColor1').innerText = "-";
     document.getElementById('valTexture').innerText = "-";
 }
 
