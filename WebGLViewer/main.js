@@ -4,7 +4,87 @@ const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
 const statusPanel = document.getElementById('statusPanel');
 const wireframeToggle = document.getElementById('wireframeToggle');
+const tabRenderer = document.getElementById('tabRenderer');
+const tabComparison = document.getElementById('tabComparison');
+const rendererContent = document.getElementById('rendererContent');
+const comparisonContent = document.getElementById('comparisonContent');
+const referenceImg = document.getElementById('referenceImg');
+const refImgStatus = document.getElementById('refImgStatus');
+const overlayLayer = document.getElementById('overlayLayer');
+const logAlignmentsBtn = document.getElementById('logAlignments');
+const comparisonContainer = document.getElementById('comparisonContainer');
+const resetZoomBtn = document.getElementById('resetZoom');
 
+let currentZoom = 1.0;
+
+comparisonContainer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    currentZoom = Math.min(Math.max(0.2, currentZoom + delta), 10.0);
+    comparisonContainer.style.transform = `scale(${currentZoom})`;
+}, { passive: false });
+
+resetZoomBtn.addEventListener('click', () => {
+    currentZoom = 1.0;
+    comparisonContainer.style.transform = `scale(1.0)`;
+});
+
+logAlignmentsBtn.addEventListener('click', () => {
+    const overlays = overlayLayer.querySelectorAll('.texture-overlay');
+    const logs = Array.from(overlays).map(ov => {
+        const metadata = JSON.parse(ov.dataset.metadata || '{}');
+        return {
+            texture: metadata, // Full metadata (addr, format, res, etc)
+            visualPosition: {
+                x: parseInt(ov.style.left),
+                y: parseInt(ov.style.top),
+                w: parseInt(ov.style.width),
+                h: parseInt(ov.style.height)
+            },
+            scale: {
+                x: (parseInt(ov.style.width) / metadata.w).toFixed(2),
+                y: (parseInt(ov.style.height) / metadata.h).toFixed(2)
+            }
+        };
+    });
+    console.log('[Detailed Alignment Report]', JSON.stringify(logs, null, 2));
+    alert('Detailed alignment data logged to console!');
+});
+
+// Tab Switching
+tabRenderer.addEventListener('click', () => {
+    tabRenderer.classList.add('active');
+    tabComparison.classList.remove('active');
+    rendererContent.classList.add('active');
+    comparisonContent.classList.remove('active');
+});
+
+tabComparison.addEventListener('click', () => {
+    tabComparison.classList.add('active');
+    tabRenderer.classList.remove('active');
+    comparisonContent.classList.add('active');
+    rendererContent.classList.remove('active');
+    
+    // Auto-load reference image if not already loaded
+    if (referenceImg.style.display === 'none') {
+        checkAndLoadReference();
+    }
+});
+
+function checkAndLoadReference() {
+    referenceImg.onload = () => {
+        refImgStatus.style.display = 'none';
+        referenceImg.style.display = 'block';
+    };
+    referenceImg.onerror = () => {
+        refImgStatus.innerText = 'Reference image (HomeMenuFIFO_Frame1.png) not found in data/.';
+    };
+    // The src is already set in HTML, but we can trigger it again or verify
+    if (referenceImg.src.includes('data/HomeMenuFIFO_Frame1.png')) {
+        referenceImg.style.display = 'block';
+        refImgStatus.style.display = 'none';
+    }
+}
 if (!gl) {
     statusPanel.innerText = 'WebGL not supported on this browser!';
     throw new Error('WebGL not supported');
@@ -530,7 +610,9 @@ function addTextureToInspector(unitIndex, rgba8) {
 
     card.innerHTML = `
         <div class="texture-thumb-container">
-            <img class="texture-thumb" src="${dataUrl}" alt="Texture 0x${addrHex}">
+            <img class="texture-thumb" src="${dataUrl}" alt="Texture 0x${addrHex}" 
+                 draggable="true" 
+                 id="thumb-${addrHex}">
         </div>
         <div class="texture-info">
             <div class="texture-name">Texture @ 0x${addrHex}</div>
@@ -540,6 +622,18 @@ function addTextureToInspector(unitIndex, rgba8) {
             <button class="copy-btn" id="copy-${addrHex}">Copy Info</button>
         </div>
     `;
+
+    // Add drag start listener to the thumbnail
+    document.getElementById(`thumb-${addrHex}`).addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('texData', JSON.stringify({
+            addr: addrHex,
+            src: dataUrl,
+            w: tex.width,
+            h: tex.height,
+            format: formatName,
+            unit: unitIndex
+        }));
+    });
 
     document.getElementById(`copy-${addrHex}`).addEventListener('click', () => {
         const text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
@@ -554,6 +648,156 @@ function addTextureToInspector(unitIndex, rgba8) {
             }, 2000);
         });
     });
+}
+
+// Comparison View Overlay Logic
+overlayLayer.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+});
+
+overlayLayer.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const rawData = e.dataTransfer.getData('texData');
+    if (!rawData) return;
+    const data = JSON.parse(rawData);
+
+    const rect = overlayLayer.getBoundingClientRect();
+    // Compensate for CSS transform scale
+    const x = (e.clientX - rect.left) / currentZoom;
+    const y = (e.clientY - rect.top) / currentZoom;
+
+    createOverlay(data, x, y);
+});
+
+function createOverlay(data, x, y) {
+    const overlay = document.createElement('div');
+    overlay.className = 'texture-overlay';
+    overlay.dataset.metadata = JSON.stringify(data); // Store for reporting
+    
+    // Maintain state for current dimensions
+    let curW = data.w;
+    let curH = data.h;
+    
+    overlay.style.width = `${curW}px`;
+    overlay.style.height = `${curH}px`;
+    
+    // Ensure initial placement stays within bounds if possible, centered on drop
+    const left = Math.max(0, x - curW / 2);
+    const top = Math.max(0, y - curH / 2);
+    overlay.style.left = `${left}px`;
+    overlay.style.top = `${top}px`;
+    
+    // Add Label for debugging coordinates and scale
+    const label = document.createElement('div');
+    label.className = 'overlay-label';
+    overlay.appendChild(label);
+
+    let fadeTimer = null;
+    const showLabel = () => {
+        label.classList.remove('hidden');
+        if (fadeTimer) clearTimeout(fadeTimer);
+        fadeTimer = setTimeout(() => {
+            label.classList.add('hidden');
+        }, 2000);
+    };
+
+    const updateLabel = (l, t, w, h) => {
+        const scaleX = (w / data.w).toFixed(2);
+        const scaleY = (h / data.h).toFixed(2);
+        label.innerText = `Pos: ${Math.round(l)},${Math.round(t)} | Size: ${Math.round(w)}x${Math.round(h)} | Scale: ${scaleX}x${scaleY}`;
+        showLabel();
+    };
+    updateLabel(left, top, curW, curH);
+
+    const img = document.createElement('img');
+    img.src = data.src;
+    overlay.appendChild(img);
+
+    // Add Resize Handle
+    const handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    overlay.appendChild(handle);
+
+    // Interaction logic
+    let isMoving = false;
+    let isResizing = false;
+    let startX, startY, startLeft, startTop, startW, startH;
+
+    // Movement Logic
+    overlay.addEventListener('mousedown', (e) => {
+        if (e.target === handle) return; // Ignore if resizing
+        isMoving = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = parseInt(overlay.style.left);
+        startTop = parseInt(overlay.style.top);
+        overlay.style.zIndex = 1000;
+        showLabel();
+        e.preventDefault();
+    });
+
+    // Resizing Logic
+    handle.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        startW = curW;
+        startH = curH;
+        showLabel();
+        e.preventDefault();
+        e.stopPropagation(); // Don't trigger movement
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (isMoving) {
+            // Compensate for CSS transform scale
+            const dx = (e.clientX - startX) / currentZoom;
+            const dy = (e.clientY - startY) / currentZoom;
+            const newLeft = startLeft + dx;
+            const newTop = startTop + dy;
+            overlay.style.left = `${newLeft}px`;
+            overlay.style.top = `${newTop}px`;
+            updateLabel(newLeft, newTop, curW, curH);
+        } else if (isResizing) {
+            // Compensate for CSS transform scale
+            const dx = (e.clientX - startX) / currentZoom;
+            const dy = (e.clientY - startY) / currentZoom;
+            
+            // Proportional resizing by default
+            const aspectRatio = data.w / data.h;
+            
+            if (Math.abs(dx) > Math.abs(dy)) {
+                curW = Math.max(10, startW + dx);
+                curH = curW / aspectRatio;
+            } else {
+                curH = Math.max(10, startH + dy);
+                curW = curH * aspectRatio;
+            }
+            
+            overlay.style.width = `${curW}px`;
+            overlay.style.height = `${curH}px`;
+            updateLabel(parseInt(overlay.style.left), parseInt(overlay.style.top), curW, curH);
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (isMoving) {
+            isMoving = false;
+            console.log(`[Alignment Debug] Texture 0x${data.addr} moved to X: ${parseInt(overlay.style.left)}, Y: ${parseInt(overlay.style.top)}`);
+        }
+        if (isResizing) {
+            isResizing = false;
+            console.log(`[Alignment Debug] Texture 0x${data.addr} resized to Size: ${Math.round(curW)}x${Math.round(curH)}`);
+        }
+    });
+
+    overlay.oncontextmenu = (e) => {
+        e.preventDefault();
+        overlay.remove();
+    };
+
+    overlayLayer.appendChild(overlay);
 }
 
 class BPTextureUnit {

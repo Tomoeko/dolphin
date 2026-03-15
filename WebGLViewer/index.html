@@ -47,8 +47,25 @@
 
         <!-- Main Workspace for Canvas -->
         <main class="workspace">
-            <div class="canvas-container">
-                <canvas id="glcanvas" width="640" height="528"></canvas>
+            <div class="tabs-container">
+                <button id="tabRenderer" class="tab-btn active">Renderer</button>
+                <button id="tabComparison" class="tab-btn">Comparison</button>
+            </div>
+            
+            <div id="rendererContent" class="tab-view active">
+                <div class="canvas-container">
+                    <canvas id="glcanvas" width="640" height="528"></canvas>
+                </div>
+            </div>
+
+            <div id="comparisonContent" class="tab-view">
+                <div class="comparison-container" id="comparisonContainer">
+                    <button id="logAlignments" class="log-btn">Log All Alignments</button>
+                    <button id="resetZoom" class="reset-zoom-btn">Reset Zoom</button>
+                    <div id="refImgStatus" class="ref-img-status">Checking for reference image...</div>
+                    <img id="referenceImg" src="data/HomeMenuFIFO_Frame1.png" style="display:none;" />
+                    <div id="overlayLayer" class="overlay-layer"></div>
+                </div>
             </div>
         </main>
         
