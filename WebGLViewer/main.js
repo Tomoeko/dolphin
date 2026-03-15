@@ -2,7 +2,7 @@
 
 const canvas = document.getElementById('glcanvas');
 canvas.width = 640;
-canvas.height = 480;
+canvas.height = 528;
 const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
 const statusPanel = document.getElementById('statusPanel');
 const wireframeToggle = document.getElementById('wireframeToggle');
@@ -16,6 +16,8 @@ const overlayLayer = document.getElementById('overlayLayer');
 const logAlignmentsBtn = document.getElementById('logAlignments');
 const comparisonContainer = document.getElementById('comparisonContainer');
 const resetZoomBtn = document.getElementById('resetZoom');
+const coordReadout = document.getElementById('coordReadout');
+const pixelColorReadout = document.getElementById('pixelColor');
 
 let currentZoom = 1.0;
 
@@ -35,15 +37,32 @@ logAlignmentsBtn.addEventListener('click', () => {
     const overlays = overlayLayer.querySelectorAll('.texture-overlay');
     const logs = Array.from(overlays).map(ov => {
         const metadata = JSON.parse(ov.dataset.metadata || '{}');
-        // Remove 'src' (image data) to keep logs clean
         const { src, ...metaWithoutSrc } = metadata;
+        
+        // Native coordinate calculations (640x528)
+        const nativeW = 640;
+        const nativeH = 528;
+        const containerW = comparisonContainer.clientWidth;
+        const containerH = comparisonContainer.clientHeight;
+        
+        const nl = Math.round((parseInt(ov.style.left) / containerW) * nativeW);
+        const nt = Math.round((parseInt(ov.style.top) / containerH) * nativeH);
+        const nw = Math.round((parseInt(ov.style.width) / containerW) * nativeW);
+        const nh = Math.round((parseInt(ov.style.height) / containerH) * nativeH);
+
         return {
             texture: metaWithoutSrc, 
-            visualPosition: {
+            screenPosition: {
                 x: parseInt(ov.style.left),
                 y: parseInt(ov.style.top),
                 w: parseInt(ov.style.width),
                 h: parseInt(ov.style.height)
+            },
+            nativePosition: {
+                x: nl,
+                y: nt,
+                w: nw,
+                h: nh
             },
             scale: {
                 x: (parseInt(ov.style.width) / metadata.w).toFixed(2),
@@ -89,15 +108,66 @@ function checkAndLoadReference() {
         syncHeight();
     };
     referenceImg.onerror = () => {
-        refImgStatus.innerText = 'Reference image (HomeMenuFIFO_Frame1.png) not found in data/.';
+        if (referenceImg.src.includes('data/ground_truth.png')) {
+            console.log('ground_truth.png not found, falling back to HomeMenuFIFO_Frame1.png');
+            referenceImg.src = 'data/HomeMenuFIFO_Frame1.png';
+        } else {
+            refImgStatus.innerText = 'Reference image not found in data/.';
+        }
     };
-    // The src is already set in HTML, but we can trigger it again or verify
-    if (referenceImg.src.includes('data/HomeMenuFIFO_Frame1.png')) {
+    
+    // Force a reload trigger to ensure events fire
+    const currentSrc = referenceImg.src;
+    referenceImg.src = "";
+    referenceImg.src = currentSrc;
+
+    // Initial check
+    if (referenceImg.complete && referenceImg.naturalWidth > 0) {
         referenceImg.style.display = 'block';
         refImgStatus.style.display = 'none';
-        if (referenceImg.complete) syncHeight();
+        syncHeight();
     }
 }
+
+// Pixel Inspector Implementation
+const pickingCanvas = document.createElement('canvas');
+const pickingCtx = pickingCanvas.getContext('2d', { willReadFrequently: true });
+
+comparisonContainer.addEventListener('mousemove', (e) => {
+    const rect = referenceImg.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / currentZoom;
+    const y = (e.clientY - rect.top) / currentZoom;
+    
+    // Reference image is assumed to be 640x528 (native GX resolution for this frame)
+    const nativeW = 640;
+    const nativeH = 528;
+    
+    // Scale from container pixels to native pixels
+    const nx = Math.round((x / referenceImg.clientWidth) * nativeW);
+    const ny = Math.round((y / referenceImg.clientHeight) * nativeH);
+    
+    if (nx >= 0 && nx < nativeW && ny >= 0 && ny < nativeH) {
+        coordReadout.innerText = `X: ${nx}, Y: ${ny} (Native)`;
+        
+        // Update picking canvas if size changed or first run
+        if (pickingCanvas.width !== referenceImg.naturalWidth) {
+            pickingCanvas.width = referenceImg.naturalWidth;
+            pickingCanvas.height = referenceImg.naturalHeight;
+            pickingCtx.drawImage(referenceImg, 0, 0);
+        }
+
+        try {
+            const px = Math.floor((nx / nativeW) * referenceImg.naturalWidth);
+            const py = Math.floor((ny / nativeH) * referenceImg.naturalHeight);
+            const pixel = pickingCtx.getImageData(px, py, 1, 1).data;
+            const hex = "#" + ((1 << 24) + (pixel[0] << 16) + (pixel[1] << 8) + pixel[2]).toString(16).slice(1).toUpperCase();
+            pixelColorReadout.innerText = `Color: ${hex} (R:${pixel[0]} G:${pixel[1]} B:${pixel[2]})`;
+            pixelColorReadout.style.color = hex;
+        } catch(err) {
+            // Handle cross-origin or unloaded image
+        }
+    }
+});
 if (!gl) {
     statusPanel.innerText = 'WebGL not supported on this browser!';
     throw new Error('WebGL not supported');
@@ -728,7 +798,19 @@ function createOverlay(data, x, y) {
     const updateLabel = (l, t, w, h) => {
         const scaleX = (w / data.w).toFixed(2);
         const scaleY = (h / data.h).toFixed(2);
-        label.innerText = `Pos: ${Math.round(l)},${Math.round(t)} | Size: ${Math.round(w)}x${Math.round(h)} | Scale: ${scaleX}x${scaleY}`;
+        
+        // Calculate native coordinates
+        const nativeW = 640;
+        const nativeH = 528;
+        const nl = Math.round((l / comparisonContainer.clientWidth) * nativeW);
+        const nt = Math.round((t / comparisonContainer.clientHeight) * nativeH);
+        const nw = Math.round((w / comparisonContainer.clientWidth) * nativeW);
+        const nh = Math.round((h / comparisonContainer.clientHeight) * nativeH);
+
+        label.innerHTML = `
+            <div>Screen: ${Math.round(l)},${Math.round(t)} | ${Math.round(w)}x${Math.round(h)}</div>
+            <div style="color: #fff">Native: ${nl},${nt} | ${nw}x${nh} (Scale: ${scaleX}x)</div>
+        `;
         showLabel();
     };
     updateLabel(left, top, curW, curH);
