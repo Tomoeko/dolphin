@@ -121,6 +121,16 @@ struct FileFrameInfo
   u32 numMemoryUpdates;
   u8 reserved[32];
 };
+
+struct FileMemoryUpdate
+{
+  u32 fifoPosition;
+  u32 address;
+  u64 dataOffset;
+  u32 dataSize;
+  u8 type;
+  u8 reserved[3];
+};
 #pragma pack(pop)
 
 int FifoCommand(const std::vector<std::string>& args)
@@ -170,6 +180,20 @@ int FifoCommand(const std::vector<std::string>& args)
     return EXIT_FAILURE;
   }
 
+  std::string mem_out_path = options["out"];
+  if (mem_out_path.size() >= 5 && mem_out_path.substr(mem_out_path.size() - 5) == ".json") {
+      mem_out_path = mem_out_path.substr(0, mem_out_path.size() - 5) + ".mem";
+  } else {
+      mem_out_path += ".mem";
+  }
+
+  std::ofstream out_mem(mem_out_path, std::ios::binary);
+  if (!out_mem.is_open())
+  {
+    fmt::print(std::cerr, "Error: Could not open output mem file.\n");
+    return EXIT_FAILURE;
+  }
+
   u32 cpSize = std::min<u32>(256, header.cpMemSize);
   std::vector<u32> cpData(cpSize);
   infile.seekg(header.cpMemOffset, std::ios::beg);
@@ -187,7 +211,30 @@ int FifoCommand(const std::vector<std::string>& args)
     infile.seekg(frameInfo.fifoDataOffset, std::ios::beg);
     infile.read(reinterpret_cast<char*>(fifoData.data()), frameInfo.fifoDataSize);
 
-    fmt::print(out, "  {{\n    \"frame\": {},\n    \"commands\": [\n", i);
+    fmt::print(out, "  {{\n    \"frame\": {},\n", i);
+    fmt::print(out, "    \"memory_updates\": [\n");
+
+    std::vector<FileMemoryUpdate> memUpdates(frameInfo.numMemoryUpdates);
+    infile.seekg(frameInfo.memoryUpdatesOffset, std::ios::beg);
+    infile.read(reinterpret_cast<char*>(memUpdates.data()), frameInfo.numMemoryUpdates * sizeof(FileMemoryUpdate));
+
+    for (u32 j = 0; j < frameInfo.numMemoryUpdates; ++j) {
+        const auto& update = memUpdates[j];
+        
+        std::vector<u8> updateData(update.dataSize);
+        infile.seekg(update.dataOffset, std::ios::beg);
+        infile.read(reinterpret_cast<char*>(updateData.data()), update.dataSize);
+
+        u64 mem_offset = out_mem.tellp();
+        out_mem.write(reinterpret_cast<const char*>(updateData.data()), update.dataSize);
+
+        fmt::print(out, "      {{\"fifoPosition\": {}, \"address\": {}, \"size\": {}, \"type\": {}, \"offset\": {}}}{}\n",
+            update.fifoPosition, update.address, update.dataSize, update.type, mem_offset,
+            (j == frameInfo.numMemoryUpdates - 1) ? "" : ",");
+    }
+    fmt::print(out, "    ],\n");
+
+    fmt::print(out, "    \"commands\": [\n");
     JsonCallback callback(cpmem, out);
     
     OpcodeDecoder::Run(fifoData.data(), fifoData.size(), callback);
