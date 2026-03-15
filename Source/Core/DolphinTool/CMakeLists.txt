@@ -8,6 +8,8 @@ add_executable(dolphin-tool
   VerifyCommand.h
   HeaderCommand.cpp
   HeaderCommand.h
+  FifoCommand.cpp
+  FifoCommand.h
   ToolMain.cpp
 )
 

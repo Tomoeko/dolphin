@@ -11,6 +11,7 @@
 
 #include "DolphinTool/ConvertCommand.h"
 #include "DolphinTool/ExtractCommand.h"
+#include "DolphinTool/FifoCommand.h"
 #include "DolphinTool/HeaderCommand.h"
 #include "DolphinTool/VerifyCommand.h"
 
@@ -22,7 +23,7 @@ static void PrintUsage()
 {
   fmt::print(std::cerr, "usage: dolphin-tool COMMAND -h\n"
                         "\n"
-                        "commands supported: [convert, verify, header, extract]\n");
+                        "commands supported: [convert, verify, header, extract, fifo]\n");
 }
 
 #ifdef _WIN32
@@ -49,6 +50,8 @@ int main(int argc, char* argv[])
     return DolphinTool::HeaderCommand(args);
   else if (command_str == "extract")
     return DolphinTool::Extract(args);
+  else if (command_str == "fifo")
+    return DolphinTool::FifoCommand(args);
   PrintUsage();
   return EXIT_FAILURE;
 }
