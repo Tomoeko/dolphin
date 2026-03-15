@@ -510,56 +510,66 @@ const TexDecoder = {
                     }
                     continue;
                 } else if (format === 0xE) { // CMPR (DXT1)
-                    // CMPR uses 8x8 blocks, but internal layout is 4 sub-blocks of 4x4
-                    const subBlocks = [
-                        { dx: 0, dy: 0 }, { dx: 4, dy: 0 },
-                        { dx: 0, dy: 4 }, { dx: 4, dy: 4 }
-                    ];
+                    // CMPR uses 8x8 tiles, each containing 4 sub-blocks of 4x4 in Z-order
+                    const tilesX = Math.floor((width + 7) / 8);
+                    const tilesY = Math.floor((height + 7) / 8);
 
-                    for (const sb of subBlocks) {
+                    for (let sb = 0; sb < 4; sb++) {
+                        const subX = (sb & 1) * 4;
+                        const subY = (sb >> 1) * 4;
+
+                        // Each sub-block is 8 bytes
                         const c1 = (src[srcOffset] << 8) | src[srcOffset + 1];
                         const c2 = (src[srcOffset + 2] << 8) | src[srcOffset + 3];
                         srcOffset += 4;
 
-                        const r1 = ((c1 >> 11) & 0x1F) * (255 / 31);
-                        const g1 = ((c1 >> 5) & 0x3F) * (255 / 63);
-                        const b1 = (c1 & 0x1F) * (255 / 31);
+                        // Bit-accurate color expansion (565 to 888)
+                        const r1 = (c1 >> 11) & 0x1F;
+                        const g1 = (c1 >> 5) & 0x3F;
+                        const b1 = c1 & 0x1F;
+                        const R1 = (r1 << 3) | (r1 >> 2);
+                        const G1 = (g1 << 2) | (g1 >> 4);
+                        const B1 = (b1 << 3) | (b1 >> 2);
 
-                        const r2 = ((c2 >> 11) & 0x1F) * (255 / 31);
-                        const g2 = ((c2 >> 5) & 0x3F) * (255 / 63);
-                        const b2 = (c2 & 0x1F) * (255 / 31);
+                        const r2 = (c2 >> 11) & 0x1F;
+                        const g2 = (c2 >> 5) & 0x3F;
+                        const b2 = c2 & 0x1F;
+                        const R2 = (r2 << 3) | (r2 >> 2);
+                        const G2 = (g2 << 2) | (g2 >> 4);
+                        const B2 = (b2 << 3) | (b2 >> 2);
 
-                        const colors = [
-                            [r1, g1, b1, 255],
-                            [r2, g2, b2, 255]
-                        ];
+                        // Wii GX interpolation math: ((v1 * 3 + v2 * 5) >> 3)
+                        const blend = (v1, v2) => (v1 * 3 + v2 * 5) >> 3;
+                        const colors = [];
 
                         if (c1 > c2) {
-                            colors.push([
-                                (2 * r1 + r2) / 3, (2 * g1 + g2) / 3, (2 * b1 + b2) / 3, 255
-                            ]);
-                            colors.push([
-                                (r1 + 2 * r2) / 3, (g1 + 2 * g2) / 3, (b1 + 2 * b2) / 3, 255
-                            ]);
+                            colors[0] = [R1, G1, B1, 255];
+                            colors[1] = [R2, G2, B2, 255];
+                            colors[2] = [blend(R2, R1), blend(G2, G1), blend(B2, B1), 255];
+                            colors[3] = [blend(R1, R2), blend(G1, G2), blend(B1, B2), 255];
                         } else {
-                            colors.push([
-                                (r1 + r2) / 2, (g1 + g2) / 2, (b1 + b2) / 2, 255
-                            ]);
-                            colors.push([0, 0, 0, 0]); // Transparent black
+                            colors[0] = [R1, G1, B1, 255];
+                            colors[1] = [R2, G2, B2, 255];
+                            const avgR = (R1 + R2) >> 1;
+                            const avgG = (G1 + G2) >> 1;
+                            const avgB = (B1 + B2) >> 1;
+                            colors[2] = [avgR, avgG, avgB, 255];
+                            colors[3] = [avgR, avgG, avgB, 0]; // Special GX transparent color
                         }
 
                         for (let ty = 0; ty < 4; ty++) {
                             const row = src[srcOffset++];
                             for (let tx = 0; tx < 4; tx++) {
-                                const pixIdx = (row >> (6 - tx * 2)) & 0x3;
-                                const px = bx * bw + sb.dx + tx;
-                                const py = by * bh + sb.dy + ty;
+                                const px = bx * 8 + subX + tx;
+                                const py = by * 8 + subY + ty;
                                 if (px < width && py < height) {
+                                    const pixIdx = (row >> (6 - tx * 2)) & 0x3;
                                     const dstOffset = (py * width + px) * 4;
-                                    dst[dstOffset + 0] = colors[pixIdx][0];
-                                    dst[dstOffset + 1] = colors[pixIdx][1];
-                                    dst[dstOffset + 2] = colors[pixIdx][2];
-                                    dst[dstOffset + 3] = colors[pixIdx][3];
+                                    const c = colors[pixIdx];
+                                    dst[dstOffset + 0] = c[0];
+                                    dst[dstOffset + 1] = c[1];
+                                    dst[dstOffset + 2] = c[2];
+                                    dst[dstOffset + 3] = c[3];
                                 }
                             }
                         }
