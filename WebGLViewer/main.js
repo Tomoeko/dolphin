@@ -605,7 +605,23 @@ class XFMemory {
 }
 const XFState = new XFMemory();
 
-// BP State logic below
+class CPStateTracker {
+    constructor() {
+        this.vat = Array(8).fill(null).map(() => new VATGroup());
+        this.vcd = Array(8).fill(null).map(() => new VCD());
+        this.matrix_index_a = { Hex: 0 };
+        this.matrix_index_b = { Hex: 0 };
+        this.matIdxA = 0; 
+    }
+    reset() {
+        this.vat.forEach(v => v.reset());
+        this.vcd.forEach(v => v.reset());
+        this.matrix_index_a.Hex = 0;
+        this.matrix_index_b.Hex = 0;
+        this.matIdxA = 0;
+    }
+}
+const CPState = new CPStateTracker();
 
 function applyXFCommand(address, count, data) {
     for (let i = 0; i < count; i++) {
@@ -1362,24 +1378,6 @@ class BPMemory {
     }
 }
 const BPState = new BPMemory();
-
-class CPStateTracker {
-    constructor() {
-        this.vat = Array(8).fill(null).map(() => new VATGroup());
-        this.vcd = Array(8).fill(null).map(() => new VCD());
-        this.matrix_index_a = { Hex: 0 };
-        this.matrix_index_b = { Hex: 0 };
-        this.matIdxA = 0;
-    }
-    reset() {
-        this.vat.forEach(v => v.reset());
-        this.vcd.forEach(v => v.reset());
-        if (this.matrix_index_a) this.matrix_index_a.Hex = 0;
-        if (this.matrix_index_b) this.matrix_index_b.Hex = 0;
-        this.matIdxA = 0;
-    }
-}
-const CPState = new CPStateTracker();
 
 // UI Handlers
 document.getElementById('jsonInput').addEventListener('change', (e) => {
