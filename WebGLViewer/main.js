@@ -1252,25 +1252,6 @@ function applyXFCommand(addr, count, data) {
         if (offset <= 3 && offset + floatView.length > 3) XFState.viewport.xOrig = floatView[3 - offset];
         if (offset <= 4 && offset + floatView.length > 4) XFState.viewport.yOrig = floatView[4 - offset];
     }
-    // Projection Matrix is at 0x1020 (6 floats + Type at 0x1026)
-    else if (addr >= 0x1020 && addr <= 0x1026) {
-        const offset = addr - 0x1020;
-        // The type is at the end (XFMEM_SETPROJECTION + 6 = 0x1026)
-        // If the command is long enough to include 0x1026, parse it
-        if (offset + floatView.length > 6) {
-            const type = floatView[6 - offset];
-            XFState.projectionType = type;
-            const p = floatView; // Use the provided chunk
-            // Simplified: only recompute if we have a significant block
-            if (p.length >= 6) {
-                if (type === 1) { // Ortho
-                    mat4.ortho(XFState.projectionMatrix, p[0], p[1], p[3], p[2], p[4], p[5]); 
-                } else if (type === 0) { // Persp
-                    mat4.perspective(XFState.projectionMatrix, 2 * Math.atan(1/p[0]), p[1], p[2], p[3]);
-                }
-            }
-        }
-    }
 }
 
 
@@ -1680,9 +1661,10 @@ function drawPrimitive(cmd) {
             const ndcX = cx / (cw || 1);
             const ndcY = cy / (cw || 1);
 
-            // Screen Coord (Viewport: ScaleX, -ScaleY, OffsetX, OffsetY)
-            const sx = ndcX * vp.wd + vp.xOrig;
-            const sy = ndcY * (-vp.ht) + vp.yOrig;
+            // Screen Coord (Fixed to WebGL 640x360 canvas space + DOM Y-flip)
+            // ndcX = [-1, 1], ndcY = [-1, 1] (WebGL +Y is UP, DOM +Y is DOWN)
+            const sx = (ndcX * 0.5 + 0.5) * 640;
+            const sy = (-ndcY * 0.5 + 0.5) * 360;
 
             minX = Math.min(minX, sx);
             minY = Math.min(minY, sy);
