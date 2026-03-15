@@ -28,6 +28,8 @@ let startX, startY;
 let currentSelectedAddr = null;
 let maxDrawCalls = 0;
 let currentDrawCallLimit = -1; // -1 means no limit (render all)
+const GLOBAL_TEXTURE_CACHE = new Map(); // Addr -> { texture, width, height, format, rgba8 }
+let posBuffer, colorBuffer, texCoordBuffer;
 
 function updateTransform() {
     // We use translate then scale. For zoom-to-cursor, we adjust pan during the wheel event.
@@ -1028,13 +1030,16 @@ function addTextureToInspector(unitIndex, rgba8) {
     const emptyState = list.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
+    const formatName = FORMAT_NAMES[tex.format] || `0x${tex.format.toString(16)}`;
+    const dataUrl = createTextureThumbnail(rgba8, tex.width, tex.height);
+
     // Check if we already have a card for this unique texture address
     let card = document.getElementById(cardId);
     if (!card) {
         card = document.createElement('div');
         card.id = cardId;
         card.className = 'texture-card';
-        card.draggable = true; // Make the whole card draggable to prevent misclicks
+        card.draggable = true;
         
         card.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1059,9 +1064,6 @@ function addTextureToInspector(unitIndex, rgba8) {
     if (currentSelectedAddr === addrHex) {
         card.classList.add('selected');
     }
-
-    const formatName = FORMAT_NAMES[tex.format] || `0x${tex.format.toString(16)}`;
-    const dataUrl = createTextureThumbnail(rgba8, tex.width, tex.height);
 
     card.innerHTML = `
         <div class="texture-thumb-container">
@@ -1423,6 +1425,10 @@ document.getElementById('jsonInput').addEventListener('change', (e) => {
             memUpdates = jsonData[0].memory_updates; // Extract memory updates from the first frame
             statusPanel.innerText = 'JSON Loaded. ' + jsonData.length + ' frames found.';
             
+            // Clear cache and UI on new data load
+            GLOBAL_TEXTURE_CACHE.clear();
+            resetTextureInspector();
+            
             // Count total draw calls for scrubber
             let totalDC = 0;
             if (jsonData[0].commands) {
@@ -1521,6 +1527,7 @@ function tryRender() {
     const frame = jsonData[0];
     if (!frame) return;
 
+    console.time('tryRender');
     statusPanel.innerText = 'Rendering Frame 0 (' + frame.commands.length + ' commands)...';
 
     gl.clearColor(0.1, 0.1, 0.1, 1.0);
@@ -1535,7 +1542,7 @@ function tryRender() {
     CPState.reset();
     XFState.reset();
     BPState.reset();
-    resetTextureInspector(); 
+    // resetTextureInspector(); // Removed for performance - persistent UI
     drawCalls = 0;
     rendererPrimitives = [];
 
@@ -1565,6 +1572,7 @@ function tryRender() {
     // Ensure highlights are updated after rendererPrimitives is repopulated
     updateSelectedHighlights();
 
+    console.timeEnd('tryRender');
     statusPanel.innerText = `Render Complete!
 Draw Calls: ${drawCalls}
 Est. Triangles: ${triangles}`;
@@ -1593,18 +1601,30 @@ function drawPrimitive(cmd) {
 
         if (hasTex && tex.dirty) {
             if (tex.width > 0 && tex.height > 0 && tex.imageBase > 0 && memData) {
-                const rgba8 = TexDecoder.decode(tex.width, tex.height, tex.format, tex.imageBase);
-                if (rgba8) {
-                    if (!tex.webglTexture) tex.webglTexture = gl.createTexture();
-                    gl.activeTexture(gl.TEXTURE0 + i);
-                    gl.bindTexture(gl.TEXTURE_2D, tex.webglTexture);
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.width, tex.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba8);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-                    
-                    addTextureToInspector(i, rgba8);
+                const addrHex = tex.imageBase.toString(16).toUpperCase();
+                let cached = GLOBAL_TEXTURE_CACHE.get(addrHex);
+                
+                // Only decode if not in cache OR if format/size changed (rare in DFF but possible)
+                if (!cached || cached.width !== tex.width || cached.height !== tex.height || cached.format !== tex.format) {
+                    const rgba8 = TexDecoder.decode(tex.width, tex.height, tex.format, tex.imageBase);
+                    if (rgba8) {
+                        const webglTexture = cached ? cached.texture : gl.createTexture();
+                        gl.activeTexture(gl.TEXTURE0 + i);
+                        gl.bindTexture(gl.TEXTURE_2D, webglTexture);
+                        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tex.width, tex.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba8);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                        
+                        cached = { texture: webglTexture, width: tex.width, height: tex.height, format: tex.format, rgba8: rgba8 };
+                        GLOBAL_TEXTURE_CACHE.set(addrHex, cached);
+                        addTextureToInspector(i, rgba8);
+                    }
+                }
+                
+                if (cached) {
+                    tex.webglTexture = cached.texture;
                     tex.dirty = false;
                 }
             }
@@ -1866,21 +1886,21 @@ function drawPrimitive(cmd) {
         texcoords.push(u, v);
     }
 
-    const posBuffer = gl.createBuffer();
+    if (!posBuffer) posBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.DYNAMIC_DRAW);
     gl.vertexAttribPointer(programInfo.attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
 
-    const colorBuffer = gl.createBuffer();
+    if (!colorBuffer) colorBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.DYNAMIC_DRAW);
     gl.vertexAttribPointer(programInfo.attribLocations.vertexColor, 4, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.vertexColor);
 
-    const texCoordBuffer = gl.createBuffer();
+    if (!texCoordBuffer) texCoordBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texcoords), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texcoords), gl.DYNAMIC_DRAW);
     gl.vertexAttribPointer(programInfo.attribLocations.vertexTexCoord, 2, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(programInfo.attribLocations.vertexTexCoord);
 
@@ -1986,10 +2006,6 @@ function drawPrimitive(cmd) {
             }
         });
     }
-
-    gl.deleteBuffer(posBuffer);
-    gl.deleteBuffer(colorBuffer);
-    gl.deleteBuffer(texCoordBuffer);
 }
 
 // Scrubber and Debug Inspector Logic
