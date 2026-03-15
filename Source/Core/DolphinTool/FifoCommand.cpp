@@ -235,6 +235,14 @@ int FifoCommand(const std::vector<std::string>& args)
     fmt::print(out, "    ],\n");
 
     fmt::print(out, "    \"commands\": [\n");
+    if (i == 0) {
+      for (u32 reg = 0; reg < cpSize; ++reg) {
+        if (cpData[reg] != 0) {
+          fmt::print(out, "      {{\"type\": \"CP\", \"command\": {}, \"value\": {}}},\n", reg, cpData[reg]);
+        }
+      }
+    }
+
     JsonCallback callback(cpmem, out);
     
     OpcodeDecoder::Run(fifoData.data(), fifoData.size(), callback);
