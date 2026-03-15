@@ -820,7 +820,35 @@ function addTextureToInspector(unitIndex, rgba8) {
     });
 
     document.getElementById(`copy-${addrHex}`).addEventListener('click', () => {
-        const text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
+        let text = `Texture @ 0x${addrHex}\nResolution: ${tex.width}x${tex.height}\nFormat: ${formatName}\nLast Unit: ${unitIndex}`;
+        
+        // Find Renderer Positions
+        const renPrims = rendererPrimitives.filter(p => p.addr === addrHex);
+        if (renPrims.length > 0) {
+            text += `\n\n[Renderer Tab] Found ${renPrims.length} occurrences:`;
+            renPrims.forEach((p, idx) => {
+                const [x1, y1, x2, y2] = p.bbox.map(v => Math.round(v));
+                text += `\n  - Item ${idx + 1}: BBox(${x1}, ${y1}, ${x2}, ${y2})`;
+            });
+        }
+
+        // Find Comparison Positions
+        const overlays = Array.from(overlayLayer.querySelectorAll('.texture-overlay')).filter(ov => {
+            const meta = JSON.parse(ov.dataset.metadata || '{}');
+            return meta.addr === addrHex;
+        });
+
+        if (overlays.length > 0) {
+            text += `\n\n[Comparison Tab] Found ${overlays.length} overlays:`;
+            overlays.forEach((ov, idx) => {
+                const nl = Math.round(parseInt(ov.style.left));
+                const nt = Math.round(parseInt(ov.style.top));
+                const nw = Math.round(parseInt(ov.style.width));
+                const nh = Math.round(parseInt(ov.style.height));
+                text += `\n  - Item ${idx + 1}: ${nw}x${nh} @ ${nl},${nt}`;
+            });
+        }
+
         navigator.clipboard.writeText(text).then(() => {
             const btn = document.getElementById(`copy-${addrHex}`);
             const oldText = btn.innerText;
@@ -829,7 +857,11 @@ function addTextureToInspector(unitIndex, rgba8) {
             setTimeout(() => {
                 btn.innerText = oldText;
                 btn.classList.remove('success');
-            }, 2000);
+            }, 1500);
+        }).catch(err => {
+            console.error('Failed to copy info:', err);
+            alert('Clipboard copy failed. Check console for data.');
+            console.log(text);
         });
     });
 }
