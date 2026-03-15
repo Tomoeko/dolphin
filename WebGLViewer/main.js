@@ -27,13 +27,31 @@ let isPanning = false;
 let startX, startY;
 
 function updateTransform() {
+    // We use translate then scale. For zoom-to-cursor, we adjust pan during the wheel event.
     comparisonViewWrapper.style.transform = `translate(${currentPanX}px, ${currentPanY}px) scale(${currentZoom})`;
 }
 
 comparisonContainer.addEventListener('wheel', (e) => {
     e.preventDefault();
+    
+    const rect = comparisonViewWrapper.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Save previous scale
+    const oldScale = currentZoom;
+    
+    // Calculate new scale
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    currentZoom = Math.min(Math.max(0.2, currentZoom + delta), 10.0);
+    currentZoom = Math.min(Math.max(0.1, currentZoom + delta), 20.0);
+    
+    // Adjust pan to keep focal point under cursor
+    // The relative mouse position inside the scaled wrapper is (mouseX / oldScale)
+    // We want to keep this point at the same visual position.
+    const ratio = (currentZoom / oldScale) - 1;
+    currentPanX -= mouseX * ratio;
+    currentPanY -= mouseY * ratio;
+
     updateTransform();
 }, { passive: false });
 

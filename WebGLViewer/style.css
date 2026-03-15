@@ -63,7 +63,7 @@
     gap: 12px;
     align-items: center;
     width: 640px; /* Match native width */
-    transform-origin: center center;
+    transform-origin: 0 0;
 }
 
 .comparison-container {
