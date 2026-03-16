@@ -11,4 +11,7 @@
 ./WebGLViewer/scripts/bulk_dump.sh Files/HomeMenuFIFO_Frame1.dff
 
 # Build and Export
-make -C build -j $(sysctl -n hw.logicalcpu) dolphin-tool && ./build/Binaries/dolphin-tool fifo -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/HomeMenuFIFO_Frame1.json
+make -j $(sysctl -n hw.logicalcpu) dolphin-tool && ./build/Binaries/dolphin-tool fifo -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/HomeMenuFIFO_Frame1.json
+
+find WebGLViewer/data/draw_calls -mindepth 1 -de
+lete; ./WebGLViewer/scripts/bulk_dump.sh Files/HomeMenuFIFO_Frame1.dff
