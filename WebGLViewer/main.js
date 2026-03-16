@@ -226,9 +226,36 @@ canvas.addEventListener('click', (e) => {
     for (let i = rendererPrimitives.length - 1; i >= 0; i--) {
         const p = rendererPrimitives[i];
         if (x >= p.bbox[0] && x <= p.bbox[2] && y >= p.bbox[1] && y <= p.bbox[3]) {
-                if (p.texAddr) {
+            if (p.texAddr) {
                 selectTextureByAddress(p.texAddr);
                 updateStateInspector(p);
+                
+                // Sync scrubber
+                currentDrawCallLimit = p.drawCallIndex;
+                const scrubber = document.getElementById('drawCallScrubber');
+                const valueLabel = document.getElementById('scrubberValue');
+                scrubber.value = currentDrawCallLimit;
+                valueLabel.innerText = currentDrawCallLimit;
+                
+                // Sync ground truth
+                const refImg = document.getElementById('referenceImg');
+                const refStatus = document.getElementById('refImgStatus');
+                const dcImgPath = `data/draw_calls/dc_${currentDrawCallLimit-1}.png`;
+                
+                const testImg = new Image();
+                testImg.onload = () => {
+                    refImg.src = dcImgPath;
+                    refImg.style.display = 'block';
+                    refStatus.style.display = 'none';
+                };
+                testImg.onerror = () => {
+                    refImg.src = 'data/ground_truth.png';
+                    refStatus.innerText = `No snapshot for Part ${currentDrawCallLimit}, showing full Ground Truth.`;
+                    refStatus.style.display = 'block';
+                };
+                testImg.src = dcImgPath;
+                
+                tryRender(); // Update viewport to show up to this part
                 return;
             }
         }
@@ -1562,20 +1589,24 @@ function tryRender() {
 
     let triangles = 0;
 
+    let wasPrimitive = false;
     for (const cmd of frame.commands) {
         if (cmd.type === "CP") {
             applyCPCommand(cmd.command, cmd.value);
+            wasPrimitive = false;
         } else if (cmd.type === "XF") {
             applyXFCommand(cmd.address, cmd.count, cmd.data);
+            wasPrimitive = false;
         } else if (cmd.type === "BP") {
             applyBPCommand(cmd.command, cmd.value);
+            wasPrimitive = false;
         } else if (cmd.type === "Primitive") {
-            if (currentDrawCallLimit === -1 || drawCalls < currentDrawCallLimit) {
-                drawPrimitive(cmd);
+            if (!wasPrimitive) drawCalls++;
+            if (currentDrawCallLimit === -1 || drawCalls <= currentDrawCallLimit) {
+                drawPrimitive(cmd, drawCalls);
             }
-            drawCalls++;
+            wasPrimitive = true;
             // A Triangle strip (primitive=1) creates N-2 triangles
-            // Defaulting roughly to triangle fans/strips math
             triangles += Math.max(0, cmd.num_vertices - 2); 
         }
     }
@@ -1589,7 +1620,7 @@ Draw Calls: ${drawCalls}
 Est. Triangles: ${triangles}`;
 }
 
-function drawPrimitive(cmd) {
+function drawPrimitive(cmd, partIndex) {
     // Use JSON-provided ground truth state if available to bypass JS state tracking errors
     if (cmd.vcd_lo !== undefined) {
         CPState.vcd[cmd.vat].parseLO(cmd.vcd_lo);
@@ -2018,7 +2049,7 @@ function drawPrimitive(cmd) {
         }
         
         rendererPrimitives.push({
-            drawCallIndex: drawCalls,
+            drawCallIndex: partIndex,
             bbox: [minX, minY, maxX, maxY],
             texAddr: boundTex && primaryUnit !== -1 ? BPState.textures[primaryUnit].imageBase.toString(16).toUpperCase() : null,
             states: {
@@ -2035,7 +2066,7 @@ function drawPrimitive(cmd) {
 }
 
 document.getElementById('copyReport').addEventListener('click', () => {
-    const p = rendererPrimitives.find(p => p.drawCallIndex === (currentDrawCallLimit - 1));
+    const p = rendererPrimitives.find(p => p.drawCallIndex === currentDrawCallLimit);
     if (!p) {
         alert("Select a draw call first using the scrubber.");
         return;
@@ -2099,7 +2130,7 @@ document.getElementById('drawCallScrubber').addEventListener('input', (e) => {
         currentDrawCallLimit = val;
         
         // Find the primitive at this index and show its state
-        const p = rendererPrimitives.find(p => p.drawCallIndex === (val - 1));
+        const p = rendererPrimitives.find(p => p.drawCallIndex === val);
         if (p) updateStateInspector(p);
 
         // Attempt to load per-draw-call reference image
