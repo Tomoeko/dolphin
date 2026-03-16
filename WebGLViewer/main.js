@@ -188,7 +188,7 @@ function updateSelectedHighlights() {
     svg.innerHTML = '';
     
     if (currentSelectedAddr) {
-        const matches = rendererPrimitives.filter(p => p.addr === currentSelectedAddr);
+        const matches = rendererPrimitives.filter(p => p.texAddr === currentSelectedAddr);
         
         // Deduplicate boxes to avoid "double lines" from overlapping primitives
         const uniqueBoxes = new Set();
@@ -226,8 +226,8 @@ canvas.addEventListener('click', (e) => {
     for (let i = rendererPrimitives.length - 1; i >= 0; i--) {
         const p = rendererPrimitives[i];
         if (x >= p.bbox[0] && x <= p.bbox[2] && y >= p.bbox[1] && y <= p.bbox[3]) {
-            if (p.addr) {
-                selectTextureByAddress(p.addr);
+                if (p.texAddr) {
+                selectTextureByAddress(p.texAddr);
                 updateStateInspector(p);
                 return;
             }
@@ -2011,7 +2011,7 @@ function drawPrimitive(cmd) {
             const ndcX = cx / cw;
                 const ndcY = cy / cw;
                 const px = (ndcX + 1.0) * 320;
-                const py = (1.0 - ndcY) * 240; // 0 at Top for selection mapping (640x480)
+                const py = (1.0 - ndcY) * 180; // 0 at Top for selection mapping (640x360)
                 minX = Math.min(minX, px); minY = Math.min(minY, py);
                 maxX = Math.max(maxX, px);                maxY = Math.max(maxY, py);
             }
@@ -2108,7 +2108,7 @@ function updateStateInspector(p) {
     document.getElementById('valMatColor0').innerText = toHex(mc0);
     document.getElementById('valMatColor1').innerText = toHex(mc1);
 
-    document.getElementById('valTexture').innerText = `0x${p.states.texAddr || 'None'}`;
+    document.getElementById('valTexture').innerText = `0x${p.texAddr || 'None'}`;
 }
 
 function clearStateInspector() {
