@@ -4,5 +4,11 @@
 # Generate Headless Screenshot (Ground Truth)
 ./build/Binaries/dolphin-tool fifo screenshot -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/ground_truth.png
 
+# Generate Screenshot stopped at specific Draw Call
+./build/Binaries/dolphin-tool fifo screenshot -i Files/HomeMenuFIFO_Frame1.dff -d 42 -o WebGLViewer/data/dc_42.png
+
+# Bulk Capture all intermediate Draw Calls (Automation)
+./WebGLViewer/scripts/bulk_dump.sh Files/HomeMenuFIFO_Frame1.dff
+
 # Build and Export
 make -C build -j $(sysctl -n hw.logicalcpu) dolphin-tool && ./build/Binaries/dolphin-tool fifo -i Files/HomeMenuFIFO_Frame1.dff -o WebGLViewer/data/HomeMenuFIFO_Frame1.json

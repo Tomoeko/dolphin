@@ -136,6 +136,9 @@ public:
   // Callbacks
   void SetFileLoadedCallback(CallbackFunc callback);
   void SetFrameWrittenCallback(CallbackFunc callback) { m_FrameWrittenCb = std::move(callback); }
+  
+  using ObjectCallbackFunc = std::function<void(u32 index)>;
+  void SetObjectFinishedCallback(ObjectCallbackFunc callback) { m_ObjectFinishedCb = std::move(callback); }
 
   bool IsRunningWithFakeVideoInterfaceUpdates() const;
 
@@ -200,6 +203,7 @@ private:
 
   CallbackFunc m_FileLoadedCb = nullptr;
   CallbackFunc m_FrameWrittenCb = nullptr;
+  ObjectCallbackFunc m_ObjectFinishedCb = nullptr;
   Config::ConfigChangedCallbackID m_config_changed_callback_id;
 
   std::unique_ptr<FifoDataFile> m_File;

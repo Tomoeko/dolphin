@@ -184,6 +184,14 @@
     stroke-dasharray: 4 4;
 }
 
+.ground-truth-highlight {
+    fill: none;
+    stroke: #ffd700;
+    stroke-width: 1.5;
+    stroke-dasharray: 2 2;
+    opacity: 0.8;
+}
+
 .log-btn:hover {
     transform: scale(1.05);
 }
@@ -336,26 +344,71 @@ body, html {
 
 .state-inspector {
     margin-top: 15px;
-    background: var(--bg-darker);
+    background: rgba(0, 0, 0, 0.4);
     border-radius: 8px;
-    padding: 10px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 12px;
+    border: 1px solid var(--border-alpha);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.state-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border-alpha);
+    padding-bottom: 6px;
+    margin-bottom: 4px;
 }
 
 .state-row {
     display: flex;
-    justify-content: space-between;
-    font-size: 0.8rem;
-    margin-bottom: 4px;
-    font-family: 'Courier New', Courier, monospace;
+    align-items: center;
+    font-size: 11px;
+    font-family: 'Inter', sans-serif;
+    color: var(--text-primary);
+    padding: 2px 0;
 }
 
 .state-row span:first-child {
-    color: var(--text-dim);
+    flex: 1;
+    color: var(--text-secondary);
 }
 
-.state-row span:last-child {
-    color: var(--accent-color);
+.state-row span:not(:first-child) {
+    font-family: monospace;
+}
+
+.val-divider {
+    margin: 0 8px;
+    color: var(--border-alpha);
+    font-size: 9px;
+}
+
+#valZMode, #valAlphaTest, #valBlend, #valMatColor0, #valMatColor1, #valTexture {
+    color: var(--accent);
+}
+
+#valHWZMode, #valHWAlphaTest, #valHWBlend, #valHWMatColor0, #valHWMatColor1, #valHWTexture {
+    color: #ffd700; /* Gold for hardware reference */
+}
+
+.state-row.mismatch {
+    background: rgba(255, 69, 58, 0.15);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 0 -8px;
+    border-left: 3px solid #ff453a;
+}
+
+.state-row.mismatch span:first-child {
+    color: #ff453a;
+    font-weight: 600;
 }
 
 img {

@@ -51,12 +51,18 @@
                     <input type="range" id="drawCallScrubber" min="0" max="0" value="0">
                 </div>
                 <div class="state-inspector" id="stateInspector">
-                    <div class="state-row"><span>Z-Mode:</span> <span id="valZMode">-</span></div>
-                    <div class="state-row"><span>Alpha Test:</span> <span id="valAlphaTest">-</span></div>
-                    <div class="state-row"><span>Blend:</span> <span id="valBlend">-</span></div>
-                    <div class="state-row"><span>MatColor0:</span> <span id="valMatColor0">-</span></div>
-                    <div class="state-row"><span>MatColor1:</span> <span id="valMatColor1">-</span></div>
-                    <div class="state-row"><span>Texture:</span> <span id="valTexture">-</span></div>
+                    <div class="state-header">
+                        <span>Feature</span>
+                        <span>WebGL</span>
+                        <span></span>
+                        <span>Hardware</span>
+                    </div>
+                    <div class="state-row" id="rowZMode"><span>Z-Mode:</span> <span id="valZMode">-</span> <span class="val-divider">vs</span> <span id="valHWZMode">-</span></div>
+                    <div class="state-row" id="rowAlphaTest"><span>Alpha Test:</span> <span id="valAlphaTest">-</span> <span class="val-divider">vs</span> <span id="valHWAlphaTest">-</span></div>
+                    <div class="state-row" id="rowBlend"><span>Blend:</span> <span id="valBlend">-</span> <span class="val-divider">vs</span> <span id="valHWBlend">-</span></div>
+                    <div class="state-row" id="rowMatColor0"><span>MatColor0:</span> <span id="valMatColor0">-</span> <span class="val-divider">vs</span> <span id="valHWMatColor0">-</span></div>
+                    <div class="state-row" id="rowMatColor1"><span>MatColor1:</span> <span id="valMatColor1">-</span> <span class="val-divider">vs</span> <span id="valHWMatColor1">-</span></div>
+                    <div class="state-row" id="rowTexture"><span>Texture:</span> <span id="valTexture">-</span> <span class="val-divider">vs</span> <span id="valHWTexture">-</span></div>
                 </div>
                 <button id="copyReport" class="action-btn-full" style="margin-top: 10px;">Copy Technical Report</button>
             </div>

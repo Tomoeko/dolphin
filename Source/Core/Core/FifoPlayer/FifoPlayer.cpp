@@ -426,8 +426,16 @@ void FifoPlayer::WriteFrame(const FifoFrameInfo& frame, const AnalyzedFrameInfo&
       show_part = true;
     }
 
-    if (show_part)
+    if (show_part) {
       WriteFramePart(part, &memory_update, frame);
+      
+      if (part.m_type == FramePartType::PrimitiveData && m_ObjectFinishedCb)
+      {
+        FlushWGP();
+        WaitForGPUInactive();
+        m_ObjectFinishedCb(object_num - 1);
+      }
+    }
   }
 
   FlushWGP();

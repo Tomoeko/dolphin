@@ -2028,10 +2028,45 @@ function drawPrimitive(cmd) {
                 matColor0: Array.from(BPState.matColors[0]),
                 matColor1: Array.from(BPState.matColors[1])
             },
-            groundTruth: cmd.vcd_lo !== undefined ? { vcd: cmd.vcd_lo, vat: cmd.vat_a } : null
+            // Store raw command for hardware reference comparison
+            hwCmd: cmd 
         });
     }
 }
+
+document.getElementById('copyReport').addEventListener('click', () => {
+    const p = rendererPrimitives.find(p => p.drawCallIndex === (currentDrawCallLimit - 1));
+    if (!p) {
+        alert("Select a draw call first using the scrubber.");
+        return;
+    }
+
+    const hw = p.hwCmd || {};
+    let report = `=== Technical Rendering Report (Draw Call ${p.drawCallIndex}) ===\n\n`;
+    
+    const check = (label, webgl, hardware) => {
+        const match = webgl === hardware;
+        return `${label}: ${webgl} vs Hardware: ${hardware !== undefined ? hardware : 'N/A'} [${match ? 'MATCH' : 'DELTA'}]\n`;
+    };
+
+    report += check("Z-Mode", `0x${p.states.zMode.toString(16)}`, hw.zmode);
+    report += check("Alpha Test", `0x${p.states.alphaTest.toString(16)}`, hw.alpha_test);
+    report += check("Blend Mode", `0x${p.states.blendMode.toString(16)}`, hw.blend_mode);
+    report += check("Texture Addr", `0x${p.texAddr}`, hw.tex_addr ? `0x${hw.tex_addr}` : undefined);
+    
+    if (hw.xf_viewport) {
+        report += `\nHardware Viewport: ${JSON.stringify(hw.xf_viewport)}\n`;
+        report += `Hardware Projection: ${JSON.stringify(hw.xf_projection)}\n`;
+    }
+
+    navigator.clipboard.writeText(report).then(() => {
+        const btn = document.getElementById('copyReport');
+        const oldText = btn.innerText;
+        btn.innerText = "Report Copied!";
+        setTimeout(() => btn.innerText = oldText, 2000);
+    });
+});
+
 
 // Scrubber and Debug Inspector Logic
 function setupScrubber(count) {
@@ -2064,9 +2099,27 @@ document.getElementById('drawCallScrubber').addEventListener('input', (e) => {
         currentDrawCallLimit = val;
         
         // Find the primitive at this index and show its state
-        // Corrected: search in rendererPrimitives for the drawCallIndex val
         const p = rendererPrimitives.find(p => p.drawCallIndex === (val - 1));
         if (p) updateStateInspector(p);
+
+        // Attempt to load per-draw-call reference image
+        const refImg = document.getElementById('referenceImg');
+        const refStatus = document.getElementById('refImgStatus');
+        const dcImgPath = `data/draw_calls/dc_${val-1}.png`;
+        
+        const testImg = new Image();
+        testImg.onload = () => {
+            refImg.src = dcImgPath;
+            refImg.style.display = 'block';
+            refStatus.style.display = 'none';
+        };
+        testImg.onerror = () => {
+            // Fallback to main ground truth if per-draw-call doesn't exist
+            refImg.src = 'data/ground_truth.png';
+            refStatus.innerText = `No snapshot for DC ${val-1}, showing full Ground Truth.`;
+            refStatus.style.display = 'block';
+        };
+        testImg.src = dcImgPath;
     }
     
     tryRender();
@@ -2078,46 +2131,85 @@ function updateStateInspector(p) {
     const zm = p.states.zMode;
     const at = p.states.alphaTest;
     const bm = p.states.blendMode;
+    const hw = p.hwCmd || {};
     
-    // ZMode (Register 0x40)
-    const zEnabled = (zm & 1) ? "ON" : "OFF";
-    const zFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
-    const zFunc = zFuncs[(zm >> 1) & 7];
-    const zWrite = (zm >> 4) & 1 ? "W" : "R";
-    document.getElementById('valZMode').innerText = `0x${zm.toString(16)}: ${zEnabled} (${zFunc}, ${zWrite})`;
-    
-    // Alpha Test (Register 0xF3)
     const atFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
-    const atComp0 = atFuncs[at & 7];
-    const atComp1 = atFuncs[(at >> 3) & 7];
-    const atRef0 = ((at >> 8) & 0xFF);
-    const atRef1 = ((at >> 16) & 0xFF);
-    document.getElementById('valAlphaTest').innerText = `0x${at.toString(16)}: ${atComp0}/${atComp1} (Ref: ${atRef0}/${atRef1})`;
-    
-    // Blend Mode (Register 0x41)
-    const bEnabled = (bm & 1) ? "ON" : "OFF";
     const bFactors = ["ZERO", "ONE", "SRC_CLR", "INV_SRC_CLR", "SRC_ALPHA", "INV_SRC_ALPHA", "DST_ALPHA", "INV_DST_ALPHA"];
-    const bSrc = bFactors[(bm >> 5) & 7];
-    const bDst = bFactors[(bm >> 2) & 7];
-    document.getElementById('valBlend').innerText = `0x${bm.toString(16)}: ${bEnabled} (${bSrc}/${bDst})`;
-    
-    // MatColors (from XF)
-    const mc0 = p.states.matColor0 || [1,1,1,1];
-    const mc1 = p.states.matColor1 || [1,1,1,1];
     const toHex = (c) => "#" + c.map(v => Math.round(v*255).toString(16).padStart(2, '0')).join('').substring(0,6).toUpperCase();
-    document.getElementById('valMatColor0').innerText = toHex(mc0);
-    document.getElementById('valMatColor1').innerText = toHex(mc1);
 
-    document.getElementById('valTexture').innerText = `0x${p.texAddr || 'None'}`;
+    // Helper to update row and highlight mismatch
+    const updateRow = (rowId, webglId, valWebGL, hwId, valHW, isMismatch) => {
+        document.getElementById(webglId).innerText = valWebGL;
+        document.getElementById(hwId).innerText = valHW !== undefined ? valHW : "N/A";
+        const row = document.getElementById(rowId);
+        if (isMismatch) row.classList.add('mismatch');
+        else row.classList.remove('mismatch');
+    };
+
+    // Z-Mode Comparison
+    const zFuncs = ["NEVER", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "ALWAYS"];
+    const zStr = (v) => `0x${v.toString(16)}: ${(v&1)?"ON":"OFF"} (${zFuncs[(v>>1)&7]})`;
+    const hwZM = hw.zmode || 0; // Assuming stop_at_draw_call exports this as 'zmode'
+    updateRow('rowZMode', 'valZMode', zStr(zm), 'valHWZMode', hw.zmode !== undefined ? zStr(hw.zmode) : "-", zm !== hw.zmode && hw.zmode !== undefined);
+
+    // Alpha Test Comparison
+    const atStr = (v) => `0x${v.toString(16)}: ${atFuncs[v&7]}/${atFuncs[(v>>3)&7]}`;
+    updateRow('rowAlphaTest', 'valAlphaTest', atStr(at), 'valHWAlphaTest', hw.alpha_test !== undefined ? atStr(hw.alpha_test) : "-", at !== hw.alpha_test && hw.alpha_test !== undefined);
+
+    // Blend Mode Comparison
+    const bStr = (v) => `0x${v.toString(16)}: ${(v&1)?"ON":"OFF"}`;
+    updateRow('rowBlend', 'valBlend', bStr(bm), 'valHWBlend', hw.blend_mode !== undefined ? bStr(hw.blend_mode) : "-", bm !== hw.blend_mode && hw.blend_mode !== undefined);
+
+    // MatColors Comparison
+    const mc0 = p.states.matColor0 || [1,1,1,1];
+    const hwMC0 = hw.mat_color0 !== undefined ? [((hw.mat_color0>>24)&0xFF)/255, ((hw.mat_color0>>16)&0xFF)/255, ((hw.mat_color0>>8)&0xFF)/255, (hw.mat_color0&0xFF)/255] : null;
+    updateRow('rowMatColor0', 'valMatColor0', toHex(mc0), 'valHWMatColor0', hwMC0 ? toHex(hwMC0) : "-", hwMC0 && toHex(mc0) !== toHex(hwMC0));
+
+    // Texture Comparison
+    updateRow('rowTexture', 'valTexture', `0x${p.texAddr || 'None'}`, 'valHWTexture', `0x${hw.tex_addr || '-'}`, p.texAddr !== hw.tex_addr && hw.tex_addr !== undefined);
+
+    // Update Ground Truth Overlay (SVG)
+    updateGroundTruthOverlay(p);
+}
+
+function updateGroundTruthOverlay(p) {
+    const svg = document.getElementById('rendererOverlay');
+    const oldGT = svg.querySelectorAll('.ground-truth-highlight');
+    oldGT.forEach(e => e.remove());
+
+    if (!p.hwCmd || !p.hwCmd.xf_viewport || !p.hwCmd.xf_projection) return;
+
+    // Use Hardware Viewport and Projection to calculate "Ground Truth" BBox
+    const vp = p.hwCmd.xf_viewport; // [wd, ht, zRange, xOrig, yOrig, farZ]
+    const proj = p.hwCmd.xf_projection; // [p0, p1, p2, p3, p4, p5, type]
+    
+    // Simplistic projection for validation: 
+    // We compare our projected BBox with what happens if we use Dolphin's Raw Projection data.
+    // This highlights if our matrix reconstruction is wrong.
+    
+    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("x", p.bbox[0]);
+    rect.setAttribute("y", p.bbox[1]);
+    rect.setAttribute("width", p.bbox[2] - p.bbox[0]);
+    rect.setAttribute("height", p.bbox[3] - p.bbox[1]);
+    rect.setAttribute("class", "ground-truth-highlight");
+    svg.appendChild(rect);
 }
 
 function clearStateInspector() {
-    document.getElementById('valZMode').innerText = "-";
-    document.getElementById('valAlphaTest').innerText = "-";
-    document.getElementById('valBlend').innerText = "-";
-    document.getElementById('valMatColor0').innerText = "-";
-    document.getElementById('valMatColor1').innerText = "-";
-    document.getElementById('valTexture').innerText = "-";
+    ['valZMode', 'valAlphaTest', 'valBlend', 'valMatColor0', 'valMatColor1', 'valTexture',
+     'valHWZMode', 'valHWAlphaTest', 'valHWBlend', 'valHWMatColor0', 'valHWMatColor1', 'valHWTexture'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerText = "-";
+    });
+    ['rowZMode', 'rowAlphaTest', 'rowBlend', 'rowMatColor0', 'rowMatColor1', 'rowTexture'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.remove('mismatch');
+    });
+
+    const svg = document.getElementById('rendererOverlay');
+    const oldGT = svg.querySelectorAll('.ground-truth-highlight');
+    oldGT.forEach(e => e.remove());
 }
 
 

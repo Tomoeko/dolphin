@@ -23,6 +23,10 @@
 #include "Core/BootManager.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include <condition_variable>
+#include <mutex>
+#include "VideoCommon/BPMemory.h"
+#include "VideoCommon/XFMemory.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/System.h"
 #include "UICommon/UICommon.h"
@@ -75,10 +79,21 @@ public:
     for (u32 i = 0; i < total_size; i++) {
         fmt::print(m_out, "{}{}", vertex_data[i], (i == total_size - 1) ? "" : ", ");
     }
-    fmt::print(m_out, "], \"vcd_lo\": {}, \"vcd_hi\": {}, \"vat_a\": {}, \"vat_b\": {}, \"vat_c\": {}, \"tev_stages\": [",
+    fmt::print(m_out, "], \"vcd_lo\": {}, \"vcd_hi\": {}, \"vat_a\": {}, \"vat_b\": {}, \"vat_c\": {}, ",
                m_cpmem.vtx_desc.low.Hex, m_cpmem.vtx_desc.high.Hex,
                m_cpmem.vtx_attr[vat].g0.Hex, m_cpmem.vtx_attr[vat].g1.Hex, m_cpmem.vtx_attr[vat].g2.Hex);
-    
+
+    // Export resolved XF State (Projection and Viewport)
+    fmt::print(m_out, "\n      \"xf_viewport\": [{}, {}, {}, {}, {}, {}], ",
+               xfmem.viewport.wd, xfmem.viewport.ht, xfmem.viewport.zRange,
+               xfmem.viewport.xOrig, xfmem.viewport.yOrig, xfmem.viewport.farZ);
+    fmt::print(m_out, "\"xf_projection\": [{}, {}, {}, {}, {}, {}, {}], ",
+               xfmem.projection.rawProjection[0], xfmem.projection.rawProjection[1],
+               xfmem.projection.rawProjection[2], xfmem.projection.rawProjection[3],
+               xfmem.projection.rawProjection[4], xfmem.projection.rawProjection[5],
+               static_cast<u32>(xfmem.projection.type));
+
+    fmt::print(m_out, "\"tev_stages\": [");
     // Export up to 16 TEV stages
     for (u8 s = 0; s < 16; s++) {
         fmt::print(m_out, "{{\"color\": {}, \"alpha\": {}}}{}", 
@@ -89,7 +104,9 @@ public:
         fmt::print(m_out, "{{\"ra\": {}, \"gb\": {}}}{}", 
             m_bp_regs[0xE0 + k*2], m_bp_regs[0xE1 + k*2], (k == 3) ? "" : ", ");
     }
-    fmt::print(m_out, "]}},\n");
+    fmt::print(m_out, "], \"zmode\": {}, \"alpha_test\": {}, \"blend_mode\": {}", 
+               m_bp_regs[0x40], m_bp_regs[0xF3], m_bp_regs[0x41]);
+    fmt::print(m_out, "}},\n");
   }
 
   OPCODE_CALLBACK(void OnDisplayList(const u32 address, const u32 size))
@@ -176,24 +193,45 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
       .action("store")
       .help("Path to output PNG FILE.")
       .metavar("FILE");
+  parser.add_option("-d", "--draw-call")
+      .type("int")
+      .action("store")
+      .help("Stop rendering at specific draw call index.")
+      .metavar("INDEX")
+      .set_default(0);
+  parser.add_option("-b", "--backend")
+      .type("string")
+      .action("store")
+      .help("Video backend to use (Software, OpenGL, Vulkan). Default: Software")
+      .metavar("BACKEND")
+      .set_default("Software");
+  parser.add_option("--bulk-dir")
+      .type("string")
+      .action("store")
+      .dest("bulk_dir")
+      .help("Directory to save all draw call snapshots (Single pass O(N)).")
+      .metavar("DIR");
 
   const optparse::Values& options = parser.parse_args(args);
 
-  if (!options.is_set("in") || !options.is_set("out"))
+  if (!options.is_set("in") || (!options.is_set("out") && !options.is_set("bulk_dir")))
   {
-    fmt::print(std::cerr, "Error: Missing input or output\n");
+    fmt::print(std::cerr, "Error: Missing input or output/bulk_dir\n");
     return EXIT_FAILURE;
   }
 
   const std::string input_path = options["in"];
-  const std::string output_path = options["out"];
+  const std::string output_path = options.is_set("out") ? options["out"] : "";
+  const std::string backend = options["backend"];
+  const std::string bulk_dir = options.is_set("bulk_dir") ? options["bulk_dir"] : "";
+  const bool is_bulk = !bulk_dir.empty();
 
   UICommon::SetUserDirectory("");
   
-  // Force single core and software backend for reliability in headless tool
+  // Force single core and requested backend for reliability in headless tool
   Config::Init();
   Config::SetCurrent(Config::MAIN_CPU_THREAD, false);
-  Config::SetCurrent(Config::MAIN_GFX_BACKEND, "Software");
+  Config::SetCurrent(Config::MAIN_GFX_BACKEND, backend);
   Config::SetCurrent(Config::MAIN_FIFOPLAYER_LOOP_REPLAY, false);
 
   UICommon::Init();
@@ -211,50 +249,136 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
     return EXIT_FAILURE;
   }
 
-  std::atomic<bool> callback_triggered = false;
-  system.GetFifoPlayer().SetFrameWrittenCallback([&] {
-    if (callback_triggered.exchange(true))
-      return;
+  const int stop_draw_call = options.is_set("draw-call") ? std::stoi(options["draw-call"]) : -1;
+  
+  std::mutex sync_mutex;
+  std::condition_variable sync_cv;
+  std::atomic<bool> frame_done = false;
 
-    if (g_frame_dumper)
+  if (is_bulk) {
+    // Bulk mode: Loop through all draw calls in one process.
+    if (!BootManager::BootCore(system, std::move(boot), wsi))
     {
-      g_frame_dumper->SaveScreenshot(output_path);
+      fmt::print(std::cerr, "Error: Failed to boot DFF file\n");
+      return EXIT_FAILURE;
     }
-  });
 
-  if (!BootManager::BootCore(system, std::move(boot), wsi))
-  {
-    fmt::print(std::cerr, "Error: Failed to boot DFF file\n");
-    return EXIT_FAILURE;
-  }
+    // Wait for the FIFO to be loaded so we can count draw calls
+    u32 total_draws = 0;
+    int wait_timer = 5000; // 5 seconds timeout
+    while (total_draws == 0 && wait_timer > 0) {
+        total_draws = system.GetFifoPlayer().GetFrameObjectCount(0);
+        if (total_draws == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            wait_timer -= 100;
+        }
+    }
 
-  int timeout_ms = 30000;
-  while (!callback_triggered && timeout_ms > 0)
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    timeout_ms -= 100;
-  }
+    if (total_draws == 0) {
+        fmt::print(std::cerr, "Error: Could not determine draw call count or FIFO failed to load.\n");
+        Core::Stop(system);
+        Core::Shutdown(system);
+        return EXIT_FAILURE;
+    }
 
-  if (callback_triggered)
-  {
-    // Wait for the dumper thread to finish writing the PNG.
-    // FrameDumper should ideally provide an event for this, but for now we sleep.
+    fmt::print(std::cout, "Starting single-process bulk capture of {} draw calls...\n", total_draws);
+
+    // Initial sync
+    system.GetFifoPlayer().SetFrameRangeEnd(0);
+    
+    // We'll use a local variable to communicate with the callback
+    static std::string current_screenshot_path;
+    
+    system.GetFifoPlayer().SetFrameWrittenCallback([&] {
+      if (g_frame_dumper && !current_screenshot_path.empty()) {
+          g_frame_dumper->SaveScreenshot(current_screenshot_path);
+          current_screenshot_path.clear();
+      }
+      {
+        std::lock_guard<std::mutex> lk(sync_mutex);
+        frame_done = true;
+      }
+      sync_cv.notify_one();
+    });
+
+    for (u32 i = 0; i < total_draws; ++i) {
+        {
+           std::unique_lock<std::mutex> lk(sync_mutex);
+           frame_done = false;
+        }
+        
+        system.GetFifoPlayer().SetObjectRangeEnd(i + 1);
+        current_screenshot_path = fmt::format("{}/dc_{}.png", bulk_dir, i);
+        
+        // Wait for frame rendering + screenshot capture
+        std::unique_lock<std::mutex> lk(sync_mutex);
+        if (!sync_cv.wait_for(lk, std::chrono::seconds(10), [&] { return frame_done.load(); })) {
+            fmt::print(std::cerr, "Timeout waiting for draw call {}\n", i);
+            break;
+        }
+
+        if ((i + 1) % 10 == 0 || i + 1 == total_draws) {
+            fmt::print(std::cout, "\rDumped {}/{}...", i+1, total_draws);
+            std::cout.flush();
+        }
+    }
+    
+    // Give final screenshots time to write to disk
     std::this_thread::sleep_for(std::chrono::seconds(2));
-  }
-  else
-  {
-    fmt::print(std::cerr, "Error: Screenshot callback timed out.\n");
+    
+    fmt::print(std::cout, "\nBulk capture complete.\n");
     Core::Stop(system);
     Core::Shutdown(system);
-    return EXIT_FAILURE;
+
+  } else {
+    // Single screenshot mode
+    if (stop_draw_call >= 0) {
+        system.GetFifoPlayer().SetObjectRangeEnd(static_cast<u32>(stop_draw_call));
+    }
+
+    std::atomic<bool> callback_triggered = false;
+    system.GetFifoPlayer().SetFrameWrittenCallback([&] {
+      if (callback_triggered.exchange(true))
+        return;
+
+      if (g_frame_dumper)
+      {
+        g_frame_dumper->SaveScreenshot(output_path);
+      }
+    });
+
+    if (!BootManager::BootCore(system, std::move(boot), wsi))
+    {
+      fmt::print(std::cerr, "Error: Failed to boot DFF file\n");
+      return EXIT_FAILURE;
+    }
+
+    int timeout_ms = 30000;
+    while (!callback_triggered && timeout_ms > 0)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      timeout_ms -= 100;
+    }
+
+    if (callback_triggered)
+    {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    else
+    {
+      fmt::print(std::cerr, "Error: Screenshot callback timed out.\n");
+      Core::Stop(system);
+      Core::Shutdown(system);
+      return EXIT_FAILURE;
+    }
+
+    Core::Stop(system);
+    Core::Shutdown(system);
+    UICommon::ShutdownControllers();
+    UICommon::Shutdown();
+    fmt::print(std::cout, "Screenshot saved to {}\n", output_path);
   }
 
-  Core::Stop(system);
-  Core::Shutdown(system);
-  UICommon::ShutdownControllers();
-  UICommon::Shutdown();
-
-  fmt::print(std::cout, "Screenshot saved to {}\n", output_path);
   return EXIT_SUCCESS;
 }
 
