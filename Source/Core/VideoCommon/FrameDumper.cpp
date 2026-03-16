@@ -5,7 +5,9 @@
 
 #include "Common/Assert.h"
 #include "Common/FileUtil.h"
+#include "Common/Hash.h"
 #include "Common/Image.h"
+#include "Common/MsgHandler.h"
 
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
@@ -171,6 +173,7 @@ void FrameDumper::ShutdownFrameDumping()
 void FrameDumper::DumpFrameData(const u8* data, int w, int h, int stride)
 {
   m_frame_dump_data = FrameData{data, w, h, stride, m_last_frame_state};
+  m_last_frame_hash = Common::GetHash64(data, static_cast<u32>(stride * h), 0);
 
   if (!m_frame_dump_thread_running.IsSet())
   {

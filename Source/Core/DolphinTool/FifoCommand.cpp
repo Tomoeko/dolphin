@@ -5,12 +5,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
-#include <map>
 
 #include <OptionParser.h>
 #include <fmt/ostream.h>
@@ -18,6 +21,7 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
+#include "Common/FileUtil.h"
 #include "Common/Swap.h"
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
@@ -210,15 +214,12 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
   parser.add_option("--bulk-dir")
       .type("string")
       .action("store")
-      .dest("bulk_dir")
-      .help("Directory to save all draw call snapshots (Single pass O(N)).")
-      .metavar("DIR");
+      .help("Output directory for bulk screenshots.");
+  parser.add_option("--deduplicate").action("store_true").help("Deduplicate screenshots by image hash and create manifest.json.");
   parser.add_option("--resolution-type")
       .type("string")
       .action("store")
-      .dest("resolution_type")
-      .help("Screenshot resolution type: window, aspect (default), raw.")
-      .metavar("TYPE")
+      .help("Resolution type: window, aspect, or raw")
       .set_default("aspect");
 
   const optparse::Values& options = parser.parse_args(args);
@@ -302,25 +303,32 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
         return EXIT_FAILURE;
     }
 
-    fmt::print(std::cout, "Starting single-process bulk capture of {} draw calls...\n", total_draws);
+    File::CreateDirs(bulk_dir);
+    fmt::print(std::cout, "Starting single-process bulk capture of {} draw calls to {}...\n", total_draws, bulk_dir);
+
+    // Warmup: Wait for g_frame_dumper and render one frame to initialize backend
+    system.GetFifoPlayer().SetFrameRangeEnd(1);
+    int warmup_timeout = 100;
+    while (!g_frame_dumper && warmup_timeout > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        warmup_timeout--;
+    }
+    // Give backend more time to fully settle
+    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     // Initial sync
     system.GetFifoPlayer().SetFrameRangeEnd(0);
     
-    // We'll use a local variable to communicate with the callback
-    static std::string current_screenshot_path;
-    
     system.GetFifoPlayer().SetFrameWrittenCallback([&] {
-      if (g_frame_dumper && !current_screenshot_path.empty()) {
-          g_frame_dumper->SaveScreenshot(current_screenshot_path);
-          current_screenshot_path.clear();
-      }
       {
         std::lock_guard<std::mutex> lk(sync_mutex);
         frame_done = true;
       }
       sync_cv.notify_one();
     });
+
+    std::unordered_map<u64, std::string> seen_hashes;
+    std::vector<std::pair<u32, u64>> manifest;
 
     for (u32 i = 0; i < total_draws; ++i) {
         {
@@ -329,13 +337,44 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
         }
         
         system.GetFifoPlayer().SetObjectRangeEnd(i + 1);
-        current_screenshot_path = fmt::format("{}/dc_{}.png", bulk_dir, i);
         
-        // Wait for frame rendering + screenshot capture
-        std::unique_lock<std::mutex> lk(sync_mutex);
-        if (!sync_cv.wait_for(lk, std::chrono::seconds(10), [&] { return frame_done.load(); })) {
-            fmt::print(std::cerr, "Timeout waiting for draw call {}\n", i);
-            break;
+        // Wait for frame rendering
+        {
+          std::unique_lock<std::mutex> lk(sync_mutex);
+          if (!sync_cv.wait_for(lk, std::chrono::seconds(10), [&] { return frame_done.load(); })) {
+              fmt::print(std::cerr, "Timeout waiting for draw call {}\n", i);
+              break;
+          }
+        }
+
+        if (g_frame_dumper) {
+            // Small sleep to ensure renderer has caught up and readback is fresh
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+            // Ensure any previous work is flushed
+            g_frame_dumper->FlushFrameDump();
+
+            // Force a screenshot request to trigger readback and hashing
+            g_frame_dumper->SaveScreenshot("tmp_hash.png");
+            g_frame_dumper->WaitForScreenshot();
+            
+            u64 hash = g_frame_dumper->GetLastFrameHash();
+            manifest.push_back({i, hash});
+
+            if (options.is_set("deduplicate")) {
+                if (seen_hashes.find(hash) == seen_hashes.end()) {
+                    u32 unique_idx = static_cast<u32>(seen_hashes.size());
+                    std::string filename = fmt::format("dc_{}.png", unique_idx);
+                    std::string path = fmt::format("{}/{}", bulk_dir, filename);
+                    g_frame_dumper->SaveScreenshot(path);
+                    g_frame_dumper->WaitForScreenshot();
+                    seen_hashes[hash] = filename;
+                }
+            } else {
+                std::string path = fmt::format("{}/dc_{}.png", bulk_dir, i);
+                g_frame_dumper->SaveScreenshot(path);
+                g_frame_dumper->WaitForScreenshot();
+            }
         }
 
         if ((i + 1) % 10 == 0 || i + 1 == total_draws) {
@@ -344,12 +383,25 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
         }
     }
     
-    // Give final screenshots time to write to disk
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    if (options.is_set("deduplicate")) {
+        std::ofstream manifest_file(fmt::format("{}/manifest.json", bulk_dir));
+        manifest_file << "{\n  \"draw_calls\": [\n";
+        for (size_t i = 0; i < manifest.size(); ++i) {
+            manifest_file << fmt::format("    {{\"index\": {}, \"hash\": \"{:016x}\", \"filename\": \"{}\"}}", 
+                manifest[i].first, manifest[i].second, seen_hashes[manifest[i].second]);
+            if (i < manifest.size() - 1) manifest_file << ",";
+            manifest_file << "\n";
+        }
+        manifest_file << "  ]\n}\n";
+    }
     
     fmt::print(std::cout, "\nBulk capture complete.\n");
+    File::Delete("tmp_hash.png");
     Core::Stop(system);
     Core::Shutdown(system);
+
+    system.GetFifoPlayer().SetFrameWrittenCallback(nullptr);
+    system.GetFifoPlayer().SetObjectFinishedCallback(nullptr);
 
   } else {
     // Single screenshot mode
@@ -388,17 +440,18 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
     else
     {
       fmt::print(std::cerr, "Error: Screenshot callback timed out.\n");
-      Core::Stop(system);
-      Core::Shutdown(system);
-      return EXIT_FAILURE;
     }
-
-    Core::Stop(system);
-    Core::Shutdown(system);
-    UICommon::ShutdownControllers();
-    UICommon::Shutdown();
     fmt::print(std::cout, "Screenshot saved to {}\n", output_path);
   }
+
+  // Common cleanup
+  Core::Stop(system);
+  Core::Shutdown(system);
+
+  system.GetFifoPlayer().SetFrameWrittenCallback(nullptr);
+  system.GetFifoPlayer().SetObjectFinishedCallback(nullptr);
+  UICommon::ShutdownControllers();
+  UICommon::Shutdown();
 
   return EXIT_SUCCESS;
 }

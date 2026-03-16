@@ -35,6 +35,7 @@ public:
 
   bool IsFrameDumping() const;
   int GetRequiredResolutionLeastCommonMultiple() const;
+  u64 GetLastFrameHash() const { return m_last_frame_hash; }
 
   void DoState(PointerWrap& p);
 
@@ -101,6 +102,7 @@ private:
   std::string m_screenshot_name;
 
   Common::EventHook m_frame_end_handle;
+  u64 m_last_frame_hash = 0;
 };
 
 extern std::unique_ptr<FrameDumper> g_frame_dumper;

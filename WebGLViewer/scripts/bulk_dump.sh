@@ -28,6 +28,6 @@ mkdir -p "$OUTPUT_DIR"
 
 echo "Starting high-speed single-pass bulk capture from $FIFO_LOG..."
 # Run one single pass to capture ALL draw calls
-"$DOLPHIN_TOOL" fifo screenshot -i "$FIFO_LOG" -b Software --bulk-dir "$OUTPUT_DIR" --resolution-type aspect
+"$DOLPHIN_TOOL" fifo screenshot -i "$FIFO_LOG" -b Software --bulk-dir "$OUTPUT_DIR" --resolution-type aspect --deduplicate
 
 echo -e "\nDone! Snapshots saved to $OUTPUT_DIR"
