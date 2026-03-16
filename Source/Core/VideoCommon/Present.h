@@ -100,6 +100,8 @@ public:
 
   const MathUtil::Rectangle<int>& GetTargetRectangle() const { return m_target_rectangle; }
 
+  void DumpEFB(u64 ticks) const;
+
 private:
   // Fetches the XFB texture from the texture cache.
   // Returns true the contents have changed since last time

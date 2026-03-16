@@ -10,6 +10,7 @@
 #include "Core/HW/VideoInterface.h"
 #include "Core/Host.h"
 #include "Core/System.h"
+#include "Core/FifoPlayer/FifoPlayer.h"
 
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
 
@@ -256,6 +257,12 @@ void Presenter::SetNextSwapEstimatedTime(u64 ticks, TimePoint host_time)
 
 void Presenter::ProcessFrameDumping(u64 ticks) const
 {
+  auto& system = Core::System::GetInstance();
+  if (system.GetFifoPlayer().IsForceTransparentClear())
+    return;
+
+  printf("Presenter: ProcessFrameDumping called for frame %llu, IsFrameDumping=%d, m_xfb_entry=%p\n", (unsigned long long)m_frame_count, g_frame_dumper->IsFrameDumping(), m_xfb_entry.get());
+  fflush(stdout);
   if (g_frame_dumper->IsFrameDumping() && m_xfb_entry)
   {
     MathUtil::Rectangle<int> target_rect;
@@ -317,6 +324,67 @@ void Presenter::ProcessFrameDumping(u64 ticks) const
     g_frame_dumper->DumpCurrentFrame(m_xfb_entry->texture.get(), m_xfb_rect, target_rect, ticks,
                                      m_frame_count);
   }
+}
+
+void Presenter::DumpEFB(u64 ticks) const
+{
+  if (!g_frame_dumper->IsFrameDumping())
+    return;
+
+  const AbstractTexture* src_texture = g_framebuffer_manager->GetEFBColorTexture();
+  if (!src_texture)
+    return;
+
+  MathUtil::Rectangle<int> target_rect;
+  MathUtil::Rectangle<int> src_rect(0, 0, src_texture->GetWidth(), src_texture->GetHeight());
+
+  switch (g_ActiveConfig.frame_dump_resolution_type)
+  {
+  default:
+  case FrameDumpResolutionType::WindowResolution:
+  {
+    if (!g_gfx->IsHeadless())
+    {
+      target_rect = GetTargetRectangle();
+      break;
+    }
+    [[fallthrough]];
+  }
+  case FrameDumpResolutionType::XFBAspectRatioCorrectedResolution:
+  {
+    target_rect = src_rect;
+    const bool allow_stretch = false;
+    auto [float_width, float_height] =
+        ScaleToDisplayAspectRatio(src_rect.GetWidth(), src_rect.GetHeight(), allow_stretch);
+    const float draw_aspect_ratio = CalculateDrawAspectRatio(allow_stretch);
+    auto [int_width, int_height] =
+        FindClosestIntegerResolution(float_width, float_height, draw_aspect_ratio);
+    target_rect = MathUtil::Rectangle<int>(0, 0, int_width, int_height);
+    break;
+  }
+  case FrameDumpResolutionType::XFBRawResolution:
+  {
+    target_rect = src_rect;
+    break;
+  }
+  }
+
+  int width = target_rect.GetWidth();
+  int height = target_rect.GetHeight();
+
+  const int resolution_lcm = g_frame_dumper->GetRequiredResolutionLeastCommonMultiple();
+
+  if ((width % resolution_lcm) != 0 || width == 0)
+    width += resolution_lcm - (width % resolution_lcm);
+  if ((height % resolution_lcm) != 0 || height == 0)
+    height += resolution_lcm - (height % resolution_lcm);
+
+  target_rect.left = 0;
+  target_rect.top = 0;
+  target_rect.right = width;
+  target_rect.bottom = height;
+
+  g_frame_dumper->DumpCurrentFrame(src_texture, src_rect, target_rect, ticks, m_frame_count);
 }
 
 void Presenter::SetBackbuffer(int backbuffer_width, int backbuffer_height)

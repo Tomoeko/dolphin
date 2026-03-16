@@ -280,6 +280,7 @@ CPU::State FifoPlayer::AdvanceFrame()
     // GPU is the same for each playback loop.
     m_CurrentFrame = m_FrameRangeStart;
     LoadRegisters();
+    ClearEfb();
     LoadTextureMemory();
     FlushWGP();
   }
@@ -428,12 +429,19 @@ void FifoPlayer::WriteFrame(const FifoFrameInfo& frame, const AnalyzedFrameInfo&
 
     if (show_part) {
       WriteFramePart(part, &memory_update, frame);
-      
+
       if (part.m_type == FramePartType::PrimitiveData && m_ObjectFinishedCb)
       {
         FlushWGP();
         WaitForGPUInactive();
         m_ObjectFinishedCb(object_num - 1);
+      }
+
+      if (part.m_type == FramePartType::PrimitiveData && (object_num - 1) == m_ObjectRangeEnd && m_ForceTransparentClear)
+      {
+        // Stop executing the rest of the frame so that subsequent commands
+        // like EFB clears do not destroy the isolated object located in the EFB.
+        break;
       }
     }
   }

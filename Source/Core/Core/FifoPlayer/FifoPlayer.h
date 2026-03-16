@@ -143,6 +143,7 @@ public:
   bool IsRunningWithFakeVideoInterfaceUpdates() const;
 
   void SetForceTransparentClear(bool enable) { m_ForceTransparentClear = enable; }
+  bool IsForceTransparentClear() const { return m_ForceTransparentClear; }
 
 private:
   class CPUCore;

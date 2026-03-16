@@ -36,6 +36,7 @@
 #include "UICommon/UICommon.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/FrameDumper.h"
+#include "VideoCommon/Present.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoConfig.h"
@@ -307,10 +308,6 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
     // Warmup: Wait for g_frame_dumper and render one frame to initialize backend
     system.GetFifoPlayer().SetFrameRangeEnd(1);
     int warmup_timeout = 100;
-    while (!g_frame_dumper && warmup_timeout > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        warmup_timeout--;
-    }
     // Give backend more time to fully settle
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
@@ -318,6 +315,12 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
     system.GetFifoPlayer().SetFrameRangeEnd(0);
     
     system.GetFifoPlayer().SetFrameWrittenCallback([&] {
+      if (options.is_set("isolate")) {
+          g_presenter->DumpEFB(system.GetCoreTiming().GetTicks());
+          if (g_frame_dumper) {
+              g_frame_dumper->FlushFrameDump();
+          }
+      }
       {
         std::lock_guard<std::mutex> lk(sync_mutex);
         frame_done = true;
@@ -344,24 +347,22 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
             system.GetFifoPlayer().SetForceTransparentClear(false);
         }
         
+        if (g_frame_dumper) {
+            // Signal a screenshot request before the frame renders so FrameDumper captures it
+            g_frame_dumper->SaveScreenshot("tmp_hash.png");
+        }
+
         // Wait for frame rendering
         {
           std::unique_lock<std::mutex> lk(sync_mutex);
           if (!sync_cv.wait_for(lk, std::chrono::seconds(10), [&] { return frame_done.load(); })) {
-              fmt::print(std::cerr, "Timeout waiting for draw call {}\n", i);
+              fmt::print(std::cerr, "FifoCommand: Timeout waiting for draw call {}\n", i);
               break;
           }
         }
 
         if (g_frame_dumper) {
-            // Small sleep to ensure renderer has caught up and readback is fresh
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-            // Ensure any previous work is flushed
-            g_frame_dumper->FlushFrameDump();
-
-            // Force a screenshot request to trigger readback and hashing
-            g_frame_dumper->SaveScreenshot("tmp_hash.png");
+            // Wait for PNG save to finish
             g_frame_dumper->WaitForScreenshot();
             
             u64 hash = g_frame_dumper->GetLastFrameHash();
