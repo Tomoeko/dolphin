@@ -276,6 +276,8 @@ struct VideoConfig final
   bool bPreferVSForLinePointExpansion = false;
   bool bGraphicMods = false;
   std::optional<GraphicsModGroupConfig> graphics_mod_config;
+  FrameDumpResolutionType frame_dump_resolution_type =
+      FrameDumpResolutionType::XFBAspectRatioCorrectedResolution;
 
   // Hacks
   bool bEFBAccessEnable = false;

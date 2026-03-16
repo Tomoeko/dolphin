@@ -21,7 +21,6 @@
 #include "VideoCommon/PostProcessing.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
-#include "VideoCommon/VideoEvents.h"
 #include "VideoCommon/Widescreen.h"
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -260,7 +259,7 @@ void Presenter::ProcessFrameDumping(u64 ticks) const
   if (g_frame_dumper->IsFrameDumping() && m_xfb_entry)
   {
     MathUtil::Rectangle<int> target_rect;
-    switch (Config::Get(Config::GFX_FRAME_DUMPS_RESOLUTION_TYPE))
+    switch (g_ActiveConfig.frame_dump_resolution_type)
     {
     default:
     case FrameDumpResolutionType::WindowResolution:

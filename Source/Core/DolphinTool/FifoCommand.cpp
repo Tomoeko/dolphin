@@ -34,6 +34,8 @@
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/VideoBackendBase.h"
+#include "VideoCommon/VideoConfig.h"
+#include "Core/Config/GraphicsSettings.h"
 
 namespace DolphinTool
 {
@@ -211,6 +213,13 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
       .dest("bulk_dir")
       .help("Directory to save all draw call snapshots (Single pass O(N)).")
       .metavar("DIR");
+  parser.add_option("--resolution-type")
+      .type("string")
+      .action("store")
+      .dest("resolution_type")
+      .help("Screenshot resolution type: window, aspect (default), raw.")
+      .metavar("TYPE")
+      .set_default("aspect");
 
   const optparse::Values& options = parser.parse_args(args);
 
@@ -233,8 +242,20 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
   Config::SetCurrent(Config::MAIN_CPU_THREAD, false);
   Config::SetCurrent(Config::MAIN_GFX_BACKEND, backend);
   Config::SetCurrent(Config::MAIN_FIFOPLAYER_LOOP_REPLAY, false);
+  
+  const std::string res_type_str = options["resolution_type"];
+  FrameDumpResolutionType res_type = FrameDumpResolutionType::XFBAspectRatioCorrectedResolution;
+  if (res_type_str == "window")
+    res_type = FrameDumpResolutionType::WindowResolution;
+  else if (res_type_str == "aspect")
+    res_type = FrameDumpResolutionType::XFBAspectRatioCorrectedResolution;
+  else if (res_type_str == "raw")
+    res_type = FrameDumpResolutionType::XFBRawResolution;
+  else
+    fmt::print(std::cerr, "Warning: Unknown resolution type '{}', defaulting to 'aspect'\n", res_type_str);
 
   UICommon::Init();
+  Config::SetCurrent(Config::GFX_FRAME_DUMPS_RESOLUTION_TYPE, res_type);
 
   auto& system = Core::System::GetInstance();
   
