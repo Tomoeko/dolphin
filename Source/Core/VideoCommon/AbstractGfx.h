@@ -149,7 +149,8 @@ public:
   virtual void ScaleTexture(AbstractFramebuffer* dst_framebuffer,
                             const MathUtil::Rectangle<int>& dst_rect,
                             const AbstractTexture* src_texture,
-                            const MathUtil::Rectangle<int>& src_rect);
+                            const MathUtil::Rectangle<int>& src_rect,
+                            bool nearest_filter = false);
 
   // Converts an upper-left to lower-left if required by the backend, optionally
   // clamping to the framebuffer size.

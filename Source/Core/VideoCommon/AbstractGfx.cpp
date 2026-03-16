@@ -108,7 +108,7 @@ void AbstractGfx::SetViewportAndScissor(const MathUtil::Rectangle<int>& rect, fl
 void AbstractGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
                                const MathUtil::Rectangle<int>& dst_rect,
                                const AbstractTexture* src_texture,
-                               const MathUtil::Rectangle<int>& src_rect)
+                               const MathUtil::Rectangle<int>& src_rect, bool nearest_filter)
 {
   ASSERT(dst_framebuffer->GetColorFormat() == AbstractTextureFormat::RGBA8);
 
@@ -140,7 +140,8 @@ void AbstractGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
   SetPipeline(dst_framebuffer->GetLayers() > 1 ? g_shader_cache->GetRGBA8StereoCopyPipeline() :
                                                  g_shader_cache->GetRGBA8CopyPipeline());
   SetTexture(0, src_texture);
-  SetSamplerState(0, RenderState::GetLinearSamplerState());
+  SetSamplerState(0, nearest_filter ? RenderState::GetPointSamplerState() :
+                                      RenderState::GetLinearSamplerState());
   Draw(0, 3);
   EndUtilityDrawing();
   if (dst_framebuffer->GetColorAttachment())

@@ -49,7 +49,7 @@ void CopyTextureData(const TextureConfig& src_config, const u8* src_ptr, u32 src
 void SWGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
                          const MathUtil::Rectangle<int>& dst_rect,
                          const AbstractTexture* src_texture,
-                         const MathUtil::Rectangle<int>& src_rect)
+                         const MathUtil::Rectangle<int>& src_rect, bool nearest_filter)
 {
   const SWTexture* software_source_texture = static_cast<const SWTexture*>(src_texture);
   SWTexture* software_dest_texture = static_cast<SWTexture*>(dst_framebuffer->GetColorAttachment());

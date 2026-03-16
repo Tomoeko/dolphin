@@ -18,12 +18,58 @@
 #include "VideoCommon/AbstractTexture.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/Present.h"
+#include "Core/FifoPlayer/FifoPlayer.h"
+#include "Core/System.h"
 
 // The video encoder needs the image to be a multiple of x samples.
 static constexpr int VIDEO_ENCODER_LCM = 4;
 
+static std::vector<u8> DilateFrame(const FrameData& frame)
+{
+  std::vector<u8> dilated_data(frame.data, frame.data + frame.stride * frame.height);
+  for (int y = 0; y < frame.height; ++y)
+  {
+    for (int x = 0; x < frame.width; ++x)
+    {
+      u8* pixel = &dilated_data[y * frame.stride + x * 4];
+      if (pixel[3] == 0)
+      {
+        // Simple 1-pixel dilation: check 4 neighbors
+        const int dx[] = {0, 0, -1, 1};
+        const int dy[] = {-1, 1, 0, 0};
+        for (int i = 0; i < 4; ++i)
+        {
+          int nx = x + dx[i];
+          int ny = y + dy[i];
+          if (nx >= 0 && nx < frame.width && ny >= 0 && ny < frame.height)
+          {
+            const u8* neighbor = frame.data + ny * frame.stride + nx * 4;
+            if (neighbor[3] > 0)
+            {
+              pixel[0] = neighbor[0];
+              pixel[1] = neighbor[1];
+              pixel[2] = neighbor[2];
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  return dilated_data;
+}
+
 static bool DumpFrameToPNG(const FrameData& frame, const std::string& file_name)
 {
+  auto& system = Core::System::GetInstance();
+  if (system.GetFifoPlayer().IsForceTransparentClear())
+  {
+    std::vector<u8> dilated = DilateFrame(frame);
+    return Common::SavePNG(file_name, dilated.data(), Common::ImageByteFormat::RGBA, frame.width,
+                           frame.height, frame.stride,
+                           Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL));
+  }
+
   return Common::SavePNG(file_name, frame.data, Common::ImageByteFormat::RGBA, frame.width,
                          frame.height, frame.stride,
                          Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL));
@@ -43,7 +89,7 @@ FrameDumper::~FrameDumper()
 void FrameDumper::DumpCurrentFrame(const AbstractTexture* src_texture,
                                    const MathUtil::Rectangle<int>& src_rect,
                                    const MathUtil::Rectangle<int>& target_rect, u64 ticks,
-                                   int frame_number)
+                                   int frame_number, bool nearest_filter)
 {
   int source_width = src_rect.GetWidth();
   int source_height = src_rect.GetHeight();
@@ -58,7 +104,8 @@ void FrameDumper::DumpCurrentFrame(const AbstractTexture* src_texture,
       return;
 
     g_gfx->ScaleTexture(m_frame_dump_render_framebuffer.get(),
-                        m_frame_dump_render_framebuffer->GetRect(), src_texture, src_rect);
+                        m_frame_dump_render_framebuffer->GetRect(), src_texture, src_rect,
+                        nearest_filter);
     src_texture = m_frame_dump_render_texture.get();
     copy_rect = src_texture->GetRect();
   }

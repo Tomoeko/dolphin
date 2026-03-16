@@ -335,6 +335,7 @@ void Presenter::DumpEFB(u64 ticks) const
   if (!src_texture)
     return;
 
+  auto& system = Core::System::GetInstance();
   MathUtil::Rectangle<int> target_rect;
   // Use m_xfb_rect as the source rectangle for alignment with standard captures
   MathUtil::Rectangle<int> src_rect = m_xfb_rect;
@@ -394,7 +395,8 @@ void Presenter::DumpEFB(u64 ticks) const
   target_rect.right = width;
   target_rect.bottom = height;
 
-  g_frame_dumper->DumpCurrentFrame(src_texture, src_rect, target_rect, ticks, m_frame_count);
+  g_frame_dumper->DumpCurrentFrame(src_texture, src_rect, target_rect, ticks, m_frame_count,
+                                   system.GetFifoPlayer().IsForceTransparentClear());
 }
 
 void Presenter::SetBackbuffer(int backbuffer_width, int backbuffer_height)

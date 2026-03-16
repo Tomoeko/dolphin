@@ -46,7 +46,7 @@ public:
 
   void ScaleTexture(AbstractFramebuffer* dst_framebuffer, const MathUtil::Rectangle<int>& dst_rect,
                     const AbstractTexture* src_texture,
-                    const MathUtil::Rectangle<int>& src_rect) override;
+                    const MathUtil::Rectangle<int>& src_rect, bool nearest_filter = false) override;
 
   void SetScissorRect(const MathUtil::Rectangle<int>& rc) override;
 
