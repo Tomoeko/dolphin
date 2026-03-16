@@ -336,7 +336,18 @@ void Presenter::DumpEFB(u64 ticks) const
     return;
 
   MathUtil::Rectangle<int> target_rect;
-  MathUtil::Rectangle<int> src_rect(0, 0, src_texture->GetWidth(), src_texture->GetHeight());
+  // Use m_xfb_rect as the source rectangle for alignment with standard captures
+  MathUtil::Rectangle<int> src_rect = m_xfb_rect;
+
+  // Clip to actual texture size just in case m_xfb_rect is stale or invalid
+  src_rect.right = std::min(src_rect.right, static_cast<int>(src_texture->GetWidth()));
+  src_rect.bottom = std::min(src_rect.bottom, static_cast<int>(src_texture->GetHeight()));
+
+  if (src_rect.GetWidth() <= 0 || src_rect.GetHeight() <= 0)
+  {
+    // Fallback if m_xfb_rect is invalid
+    src_rect = MathUtil::Rectangle<int>(0, 0, src_texture->GetWidth(), src_texture->GetHeight());
+  }
 
   switch (g_ActiveConfig.frame_dump_resolution_type)
   {
@@ -352,7 +363,6 @@ void Presenter::DumpEFB(u64 ticks) const
   }
   case FrameDumpResolutionType::XFBAspectRatioCorrectedResolution:
   {
-    target_rect = src_rect;
     const bool allow_stretch = false;
     auto [float_width, float_height] =
         ScaleToDisplayAspectRatio(src_rect.GetWidth(), src_rect.GetHeight(), allow_stretch);
@@ -364,7 +374,7 @@ void Presenter::DumpEFB(u64 ticks) const
   }
   case FrameDumpResolutionType::XFBRawResolution:
   {
-    target_rect = src_rect;
+    target_rect = MathUtil::Rectangle<int>(0, 0, src_rect.GetWidth(), src_rect.GetHeight());
     break;
   }
   }
