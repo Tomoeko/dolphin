@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dolphin Draw Call Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Outfit:wght@300;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0d0d0d;
+            --panel-bg: rgba(30, 30, 30, 0.7);
+            --accent-color: #007aff;
+            --text-color: #e0e0e0;
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            display: flex;
+            height: 100vh;
+        }
+
+        #viewer-container {
+            flex: 1;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #0d0d0d 100%);
+            padding: 20px;
+        }
+
+        #canvas-stack {
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+            background: repeating-conic-gradient(#1a1a1a 0% 25%, #111 0% 50%) 50% / 20px 20px;
+            display: grid;
+        }
+
+        #canvas-stack img {
+            grid-area: 1/1;
+            max-width: 90vw;
+            max-height: 80vh;
+            pointer-events: none;
+            opacity: 1;
+            transition: opacity 0.2s ease;
+        }
+
+        #canvas-stack img.hidden {
+            opacity: 0;
+        }
+
+        #controls {
+            width: 320px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(20px);
+            border-left: 1px solid var(--glass-border);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            z-index: 10;
+        }
+
+        h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.5rem;
+            margin: 0 0 8px 0;
+            background: linear-gradient(135deg, #fff 0%, #aaa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 24px;
+        }
+
+        .control-group {
+            margin-bottom: 24px;
+        }
+
+        .label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .button-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--glass-border);
+            color: white;
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s ease;
+            font-family: 'Inter', sans-serif;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }
+
+        button.active {
+            background: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        #layer-list {
+            flex: 1;
+            overflow-y: auto;
+            border-top: 1px solid var(--glass-border);
+            padding-top: 16px;
+        }
+
+        .layer-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            margin-bottom: 4px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+
+        .layer-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .layer-item.hidden {
+            color: #555;
+        }
+
+        .layer-toggle {
+            width: 16px;
+            height: 16px;
+            margin-right: 12px;
+            border: 1px solid #555;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+
+        .layer-item:not(.hidden) .layer-toggle {
+            background: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        .layer-item:not(.hidden) .layer-toggle::after {
+            content: '✓';
+            color: white;
+        }
+
+        .loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+        }
+
+        /* Scrollbar */
+        #layer-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        #layer-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        #layer-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="viewer-container">
+        <div id="canvas-stack">
+            <!-- Images will be inserted here -->
+        </div>
+        <div id="loading-msg" style="position: absolute; color: #888;">Scanning for draw calls...</div>
+    </div>
+
+    <div id="controls">
+        <h1>Draw Call Stack</h1>
+        <div class="subtitle" id="status-text">Detecting images...</div>
+
+        <div class="control-group">
+            <div class="label-row">
+                <span>Layer Count</span>
+                <span id="layer-counter">0 / 0</span>
+            </div>
+            <input type="range" id="layer-slider" min="0" max="0" value="0">
+        </div>
+
+        <div class="button-row">
+            <button id="play-btn">Play Animation</button>
+            <button id="toggle-all-btn">Hide All</button>
+        </div>
+
+        <div id="layer-list">
+            <!-- Layer items will be inserted here -->
+        </div>
+    </div>
+
+    <script>
+        const stack = document.getElementById('canvas-stack');
+        const slider = document.getElementById('layer-slider');
+        const counter = document.getElementById('layer-counter');
+        const layerList = document.getElementById('layer-list');
+        const playBtn = document.getElementById('play-btn');
+        const toggleAllBtn = document.getElementById('toggle-all-btn');
+        const statusText = document.getElementById('status-text');
+        const loadingMsg = document.getElementById('loading-msg');
+
+        let totalLayers = 0;
+        let images = [];
+        let items = [];
+        let isPlaying = false;
+
+        async function scanImages() {
+            let i = 0;
+            const maxSearch = 500; // Safety cap
+            
+            while (i < maxSearch) {
+                const img = new Image();
+                const path = `draw_calls/dc_${i}.png`;
+                
+                try {
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = reject;
+                        img.src = path;
+                    });
+                    
+                    img.id = `img-${i}`;
+                    img.dataset.index = i;
+                    stack.appendChild(img);
+                    images.push(img);
+                    
+                    createLayerItem(i);
+                    i++;
+                } catch (e) {
+                    break;
+                }
+            }
+            
+            totalLayers = i;
+            if (totalLayers === 0) {
+                statusText.innerText = "No images found in draw_calls/";
+                loadingMsg.innerText = "Error: No images found. Ensure draw_calls/ folder is next to this file.";
+                return;
+            }
+
+            loadingMsg.style.display = 'none';
+            statusText.innerText = `Loaded ${totalLayers} layers`;
+            slider.max = totalLayers - 1;
+            slider.value = totalLayers - 1;
+            updateCounter();
+            updateVisibilityFromSlider();
+        }
+
+        function createLayerItem(index) {
+            const item = document.createElement('div');
+            item.className = 'layer-item';
+            item.id = `item-${index}`;
+            item.innerHTML = `
+                <div class="layer-toggle"></div>
+                <span>Draw Call ${index}</span>
+            `;
+            item.onclick = () => toggleLayer(index);
+            layerList.appendChild(item);
+            items.push(item);
+        }
+
+        function toggleLayer(index) {
+            const img = images[index];
+            const item = items[index];
+            
+            if (img.classList.contains('hidden')) {
+                img.classList.remove('hidden');
+                item.classList.remove('hidden');
+            } else {
+                img.classList.add('hidden');
+                item.classList.add('hidden');
+            }
+        }
+
+        function updateVisibilityFromSlider() {
+            const val = parseInt(slider.value);
+            images.forEach((img, idx) => {
+                const item = items[idx];
+                if (idx <= val) {
+                    img.classList.remove('hidden');
+                    item.classList.remove('hidden');
+                } else {
+                    img.classList.add('hidden');
+                    item.classList.add('hidden');
+                }
+            });
+            updateCounter();
+        }
+
+        function updateCounter() {
+            const visible = images.filter(img => !img.classList.contains('hidden')).length;
+            counter.innerText = `${visible} / ${totalLayers}`;
+        }
+
+        slider.oninput = updateVisibilityFromSlider;
+
+        toggleAllBtn.onclick = () => {
+            const allHidden = images.every(img => img.classList.contains('hidden'));
+            if (allHidden) {
+                images.forEach((img, idx) => {
+                    img.classList.remove('hidden');
+                    items[idx].classList.remove('hidden');
+                });
+                toggleAllBtn.innerText = "Hide All";
+                slider.value = totalLayers - 1;
+            } else {
+                images.forEach((img, idx) => {
+                    img.classList.add('hidden');
+                    items[idx].classList.add('hidden');
+                });
+                toggleAllBtn.innerText = "Show All";
+                slider.value = 0;
+            }
+            updateCounter();
+        };
+
+        playBtn.onclick = async () => {
+            if (isPlaying) return;
+            isPlaying = true;
+            playBtn.classList.add('active');
+            
+            // Hide all first
+            images.forEach((img, idx) => {
+                img.classList.add('hidden');
+                items[idx].classList.add('hidden');
+            });
+
+            for (let i = 0; i < totalLayers; i++) {
+                images[i].classList.remove('hidden');
+                items[i].classList.remove('hidden');
+                slider.value = i;
+                updateCounter();
+                await new Promise(r => setTimeout(r, 50));
+            }
+            
+            isPlaying = false;
+            playBtn.classList.remove('active');
+        };
+
+        scanImages();
+    </script>
+</body>
+</html>
