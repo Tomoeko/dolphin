@@ -142,6 +142,8 @@ public:
 
   bool IsRunningWithFakeVideoInterfaceUpdates() const;
 
+  void SetForceTransparentClear(bool enable) { m_ForceTransparentClear = enable; }
+
 private:
   class CPUCore;
   friend class CPUCore;
@@ -209,4 +211,5 @@ private:
   std::unique_ptr<FifoDataFile> m_File;
 
   std::vector<AnalyzedFrameInfo> m_FrameInfo;
+  bool m_ForceTransparentClear = false;
 };

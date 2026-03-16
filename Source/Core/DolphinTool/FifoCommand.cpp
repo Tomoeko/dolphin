@@ -211,11 +211,9 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
       .help("Video backend to use (Software, OpenGL, Vulkan). Default: Software")
       .metavar("BACKEND")
       .set_default("Software");
-  parser.add_option("--bulk-dir")
-      .type("string")
-      .action("store")
-      .help("Output directory for bulk screenshots.");
+  parser.add_option("--bulk-dir").type("string").help("Directory to save screenshots for all draw calls.");
   parser.add_option("--deduplicate").action("store_true").help("Deduplicate screenshots by image hash and create manifest.json.");
+  parser.add_option("--isolate").action("store_true").help("Isolate each draw call to a transparent PNG.");
   parser.add_option("--resolution-type")
       .type("string")
       .action("store")
@@ -336,7 +334,15 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
            frame_done = false;
         }
         
-        system.GetFifoPlayer().SetObjectRangeEnd(i + 1);
+        if (options.is_set("isolate")) {
+            system.GetFifoPlayer().SetObjectRangeStart(i);
+            system.GetFifoPlayer().SetObjectRangeEnd(i);
+            system.GetFifoPlayer().SetForceTransparentClear(true);
+        } else {
+            system.GetFifoPlayer().SetObjectRangeStart(0);
+            system.GetFifoPlayer().SetObjectRangeEnd(i);
+            system.GetFifoPlayer().SetForceTransparentClear(false);
+        }
         
         // Wait for frame rendering
         {

@@ -588,6 +588,20 @@ void FifoPlayer::ClearEfb()
   // Trigger a bogus EFB copy to clear the screen
   // The target address is 0, and there shouldn't be anything there,
   // but even if there is it should be loaded in by LoadTextureMemory afterwards
+  
+  if (m_ForceTransparentClear)
+  {
+    // Force transparent black background for isolation
+    LoadBPReg(BPMEM_CLEAR_AR, 0x00FFFFFF); // Alpha 0 (upper 8 bits), RGB don't matter but registers are separate
+    LoadBPReg(BPMEM_CLEAR_GB, 0x00000000); // G 0, B 0
+    // LoadBPReg(BPMEM_CLEAR_AR, (0 << 16) | (0xFFFFFF & bpmem.clearcolorAR)); // Alternative if we wanted to preserve RGB
+    
+    // We also need to set the AR register correctly. Actually 0x4F (CLEAR_AR) is [Alpha:8][Red:8][Unused:8]
+    // And 0x50 (CLEAR_GB) is [Green:8][Blue:8][Unused:8]
+    LoadBPReg(BPMEM_CLEAR_AR, 0x00000000); // A=0, R=0
+    LoadBPReg(BPMEM_CLEAR_GB, 0x00000000); // G=0, B=0
+  }
+
   X10Y10 tl = bpmem.copyTexSrcXY;
   tl.x = 0;
   tl.y = 0;

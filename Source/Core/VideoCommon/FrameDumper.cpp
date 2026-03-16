@@ -24,9 +24,9 @@ static constexpr int VIDEO_ENCODER_LCM = 4;
 
 static bool DumpFrameToPNG(const FrameData& frame, const std::string& file_name)
 {
-  return Common::ConvertRGBAToRGBAndSavePNG(file_name, frame.data, frame.width, frame.height,
-                                            frame.stride,
-                                            Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL));
+  return Common::SavePNG(file_name, frame.data, Common::ImageByteFormat::RGBA, frame.width,
+                         frame.height, frame.stride,
+                         Config::Get(Config::GFX_PNG_COMPRESSION_LEVEL));
 }
 
 FrameDumper::FrameDumper()
