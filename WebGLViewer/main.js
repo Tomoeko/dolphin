@@ -2076,8 +2076,8 @@ function setupScrubber(count) {
     
     if (count > 0) {
         controls.style.display = 'block';
-        scrubber.max = count;
-        scrubber.value = count;
+        scrubber.max = count + 1;
+        scrubber.value = count + 1;
         valueLabel.innerText = "All";
         currentDrawCallLimit = -1;
     } else {
