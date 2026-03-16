@@ -10,6 +10,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <map>
 
 #include <OptionParser.h>
 #include <fmt/ostream.h>
@@ -56,6 +57,7 @@ public:
 
   OPCODE_CALLBACK(void OnBP(const u8 command, const u32 value))
   {
+    m_bp_regs[command] = value;
     fmt::print(m_out, "      {{\"type\": \"BP\", \"command\": {}, \"value\": {}}},\n", command, value);
   }
 
@@ -73,9 +75,21 @@ public:
     for (u32 i = 0; i < total_size; i++) {
         fmt::print(m_out, "{}{}", vertex_data[i], (i == total_size - 1) ? "" : ", ");
     }
-    fmt::print(m_out, "], \"vcd_lo\": {}, \"vcd_hi\": {}, \"vat_a\": {}, \"vat_b\": {}, \"vat_c\": {}}},\n",
+    fmt::print(m_out, "], \"vcd_lo\": {}, \"vcd_hi\": {}, \"vat_a\": {}, \"vat_b\": {}, \"vat_c\": {}, \"tev_stages\": [",
                m_cpmem.vtx_desc.low.Hex, m_cpmem.vtx_desc.high.Hex,
                m_cpmem.vtx_attr[vat].g0.Hex, m_cpmem.vtx_attr[vat].g1.Hex, m_cpmem.vtx_attr[vat].g2.Hex);
+    
+    // Export up to 16 TEV stages
+    for (u8 s = 0; s < 16; s++) {
+        fmt::print(m_out, "{{\"color\": {}, \"alpha\": {}}}{}", 
+            m_bp_regs[0xC0 + s*2], m_bp_regs[0xC1 + s*2], (s == 15) ? "" : ", ");
+    }
+    fmt::print(m_out, "], \"tev_kcolors\": [");
+    for (u8 k = 0; k < 4; k++) { // 4 KColors (each takes 2 regs in some mappings, but let's use 0xE0-0xE7)
+        fmt::print(m_out, "{{\"ra\": {}, \"gb\": {}}}{}", 
+            m_bp_regs[0xE0 + k*2], m_bp_regs[0xE1 + k*2], (k == 3) ? "" : ", ");
+    }
+    fmt::print(m_out, "]}},\n");
   }
 
   OPCODE_CALLBACK(void OnDisplayList(const u32 address, const u32 size))
@@ -99,6 +113,7 @@ public:
 
   CPState& m_cpmem;
   std::ofstream& m_out;
+  std::map<u8, u32> m_bp_regs;
 };
 
 #pragma pack(push, 1)
