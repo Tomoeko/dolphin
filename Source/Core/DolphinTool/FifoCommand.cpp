@@ -22,6 +22,8 @@
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
+#include "Common/Hash.h"
+#include "Common/Image.h"
 #include "Common/Swap.h"
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
@@ -315,12 +317,6 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
     system.GetFifoPlayer().SetFrameRangeEnd(0);
     
     system.GetFifoPlayer().SetFrameWrittenCallback([&] {
-      if (options.is_set("isolate")) {
-          g_presenter->DumpEFB(system.GetCoreTiming().GetTicks());
-          if (g_frame_dumper) {
-              g_frame_dumper->FlushFrameDump();
-          }
-      }
       {
         std::lock_guard<std::mutex> lk(sync_mutex);
         frame_done = true;
@@ -330,25 +326,22 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
 
     std::unordered_map<u64, std::string> seen_hashes;
     std::vector<std::pair<u32, u64>> manifest;
+    FrameDumper::FramePixels prev_frame;
 
     for (u32 i = 0; i < total_draws; ++i) {
         {
            std::unique_lock<std::mutex> lk(sync_mutex);
            frame_done = false;
         }
-        
-        if (options.is_set("isolate")) {
-            system.GetFifoPlayer().SetObjectRangeStart(i);
-            system.GetFifoPlayer().SetObjectRangeEnd(i);
-            system.GetFifoPlayer().SetForceTransparentClear(true);
-        } else {
-            system.GetFifoPlayer().SetObjectRangeStart(0);
-            system.GetFifoPlayer().SetObjectRangeEnd(i);
-            system.GetFifoPlayer().SetForceTransparentClear(false);
-        }
-        
+
+        // Always render cumulatively [0..i] with normal (opaque) clear.
+        // The diff against the previous cumulative frame extracts each
+        // draw call's exact contribution as a transparent layer.
+        system.GetFifoPlayer().SetObjectRangeStart(0);
+        system.GetFifoPlayer().SetObjectRangeEnd(i);
+        system.GetFifoPlayer().SetForceTransparentClear(false);
+
         if (g_frame_dumper) {
-            // Signal a screenshot request before the frame renders so FrameDumper captures it
             g_frame_dumper->SaveScreenshot("tmp_hash.png");
         }
 
@@ -362,25 +355,84 @@ static int ScreenshotCommand(const std::vector<std::string>& args)
         }
 
         if (g_frame_dumper) {
-            // Wait for PNG save to finish
             g_frame_dumper->WaitForScreenshot();
-            
+
+            auto curr = g_frame_dumper->CopyLastFramePixels();
             u64 hash = g_frame_dumper->GetLastFrameHash();
             manifest.push_back({i, hash});
 
-            if (options.is_set("deduplicate")) {
-                if (seen_hashes.find(hash) == seen_hashes.end()) {
-                    u32 unique_idx = static_cast<u32>(seen_hashes.size());
-                    std::string filename = fmt::format("dc_{}.png", unique_idx);
-                    std::string path = fmt::format("{}/{}", bulk_dir, filename);
+            if (options.is_set("isolate") && curr.width > 0 && curr.height > 0) {
+                // Compute the diff layer: pixels changed from prev_frame become
+                // the layer content; unchanged pixels get alpha=0 (transparent).
+                std::vector<u8> diff_data(curr.stride * curr.height, 0);
+
+                for (int y = 0; y < curr.height; ++y) {
+                    for (int x = 0; x < curr.width; ++x) {
+                        int offset = y * curr.stride + x * 4;
+                        u8 cr = curr.data[offset + 0];
+                        u8 cg = curr.data[offset + 1];
+                        u8 cb = curr.data[offset + 2];
+
+                        bool changed = false;
+                        if (!prev_frame.data.empty() && prev_frame.width == curr.width &&
+                            prev_frame.height == curr.height) {
+                            u8 pr = prev_frame.data[offset + 0];
+                            u8 pg = prev_frame.data[offset + 1];
+                            u8 pb = prev_frame.data[offset + 2];
+                            changed = (cr != pr || cg != pg || cb != pb);
+                        } else {
+                            // First draw call: any non-black pixel is a change from
+                            // the initial opaque black clear
+                            changed = (cr != 0 || cg != 0 || cb != 0);
+                        }
+
+                        if (changed) {
+                            diff_data[offset + 0] = cr;
+                            diff_data[offset + 1] = cg;
+                            diff_data[offset + 2] = cb;
+                            diff_data[offset + 3] = 255;
+                        }
+                        // else: stays RGBA(0,0,0,0) = transparent
+                    }
+                }
+
+                if (options.is_set("deduplicate")) {
+                    u64 diff_hash = Common::GetHash64(diff_data.data(),
+                        static_cast<u32>(diff_data.size()), 0);
+                    // Update manifest hash to reflect the diff, not the cumulative frame
+                    manifest.back().second = diff_hash;
+
+                    if (seen_hashes.find(diff_hash) == seen_hashes.end()) {
+                        u32 unique_idx = static_cast<u32>(seen_hashes.size());
+                        std::string filename = fmt::format("dc_{}.png", unique_idx);
+                        std::string path = fmt::format("{}/{}", bulk_dir, filename);
+                        Common::SavePNG(path, diff_data.data(), Common::ImageByteFormat::RGBA,
+                                        curr.width, curr.height, curr.stride);
+                        seen_hashes[diff_hash] = filename;
+                    }
+                } else {
+                    std::string path = fmt::format("{}/dc_{}.png", bulk_dir, i);
+                    Common::SavePNG(path, diff_data.data(), Common::ImageByteFormat::RGBA,
+                                    curr.width, curr.height, curr.stride);
+                }
+
+                prev_frame = std::move(curr);
+            } else {
+                // Non-isolate mode: save the cumulative frame directly
+                if (options.is_set("deduplicate")) {
+                    if (seen_hashes.find(hash) == seen_hashes.end()) {
+                        u32 unique_idx = static_cast<u32>(seen_hashes.size());
+                        std::string filename = fmt::format("dc_{}.png", unique_idx);
+                        std::string path = fmt::format("{}/{}", bulk_dir, filename);
+                        g_frame_dumper->SaveScreenshot(path);
+                        g_frame_dumper->WaitForScreenshot();
+                        seen_hashes[hash] = filename;
+                    }
+                } else {
+                    std::string path = fmt::format("{}/dc_{}.png", bulk_dir, i);
                     g_frame_dumper->SaveScreenshot(path);
                     g_frame_dumper->WaitForScreenshot();
-                    seen_hashes[hash] = filename;
                 }
-            } else {
-                std::string path = fmt::format("{}/dc_{}.png", bulk_dir, i);
-                g_frame_dumper->SaveScreenshot(path);
-                g_frame_dumper->WaitForScreenshot();
             }
         }
 

@@ -38,6 +38,17 @@ public:
   int GetRequiredResolutionLeastCommonMultiple() const;
   u64 GetLastFrameHash() const { return m_last_frame_hash; }
 
+  // Returns a copy of the last dumped frame's raw RGBA pixel data.
+  // The data is in row-major order, 4 bytes per pixel (RGBA), with the given stride.
+  struct FramePixels
+  {
+    std::vector<u8> data;
+    int width = 0;
+    int height = 0;
+    int stride = 0;
+  };
+  FramePixels CopyLastFramePixels() const;
+
   void DoState(PointerWrap& p);
 
 private:
@@ -104,6 +115,9 @@ private:
 
   Common::EventHook m_frame_end_handle;
   u64 m_last_frame_hash = 0;
+
+  // Cached copy of the last frame's pixel data for programmatic access
+  FramePixels m_last_frame_pixels;
 };
 
 extern std::unique_ptr<FrameDumper> g_frame_dumper;

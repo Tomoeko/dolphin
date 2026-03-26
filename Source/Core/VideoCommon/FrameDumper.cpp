@@ -222,6 +222,12 @@ void FrameDumper::DumpFrameData(const u8* data, int w, int h, int stride)
   m_frame_dump_data = FrameData{data, w, h, stride, m_last_frame_state};
   m_last_frame_hash = Common::GetHash64(data, static_cast<u32>(stride * h), 0);
 
+  // Cache a copy of the pixel data for programmatic access (e.g. cumulative diff export)
+  m_last_frame_pixels.width = w;
+  m_last_frame_pixels.height = h;
+  m_last_frame_pixels.stride = stride;
+  m_last_frame_pixels.data.assign(data, data + stride * h);
+
   if (!m_frame_dump_thread_running.IsSet())
   {
     if (m_frame_dump_thread.joinable())
@@ -416,6 +422,11 @@ int FrameDumper::GetRequiredResolutionLeastCommonMultiple() const
   if (Config::Get(Config::MAIN_MOVIE_DUMP_FRAMES))
     return VIDEO_ENCODER_LCM;
   return 1;
+}
+
+FrameDumper::FramePixels FrameDumper::CopyLastFramePixels() const
+{
+  return m_last_frame_pixels;
 }
 
 void FrameDumper::DoState(PointerWrap& p)

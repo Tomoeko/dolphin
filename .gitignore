@@ -51,3 +51,5 @@ WebGLViewer/data/HomeMenuFIFO_Frame1.mem
 WebGLViewer/data/HomeMenuFIFO_Frame1.png
 WebGLViewer/data/ground_truth.png
 /WebGLViewer/data/draw_calls
+/WebGLViewer/data/draw_calls_isolated_79
+/WebGLViewer/data/draw_calls_not_isolated_85
